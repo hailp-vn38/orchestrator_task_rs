@@ -1,0 +1,3 @@
+# Unified Schedule and Reminder Model in `task_schedules`
+
+Both Flow 2's `reminder_planner` subagent (`reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`) and the homelab server's background task scheduler require one-shot timestamps (`due_at`), recurring cron expressions (`cron_expr`), scope isolation, and `[[WikiLinks]]` attachments. We unify both concepts into a single `task_schedules` table distinguished by `action_kind` (`notify_only` for Reminders vs `spawn_task` for automated Task creation) and driven by one tokio timer loop. This eliminates duplicate timer loops and schema drift while allowing both the `reminder_*` host tools and the Voice Agent schedule tool to operate on the same canonical store.

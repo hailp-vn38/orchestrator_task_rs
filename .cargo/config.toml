@@ -1,0 +1,35 @@
+[term]
+color = "never"
+progress.when = "never"   # Không in progress bar vào log/agent output
+
+[build]
+incremental = false       # Tắt incremental cache (tránh phình hàng GB trong target/debug/incremental và hàng trăm nghìn file .rcgu.o)
+
+[profile.dev]
+debug = false             # Tắt DWARF debuginfo (panic!/assert! vẫn hiện đầy đủ file:line:col nhờ #[track_caller])
+strip = "debuginfo"       # Loại bỏ debug sections từ prebuilt/sys crates
+split-debuginfo = "off"   # Không tách file .rcgu.o / .dSYM rời trên macOS
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+strip = "debuginfo"
+opt-level = 0
+
+[profile.test]
+debug = false
+strip = "debuginfo"
+split-debuginfo = "off"
+incremental = false
+
+[profile.test.package."*"]
+debug = false
+strip = "debuginfo"
+opt-level = 0
+
+[profile.release]
+debug = false
+strip = "debuginfo"
+lto = "thin"
+codegen-units = 1
+

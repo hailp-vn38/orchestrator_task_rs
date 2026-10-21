@@ -1,0 +1,433 @@
+//! Integration tests tại public interface của `TaskManager` (theo `codebase-design`:
+//! "The interface is the test surface").
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use llm_wiki::prompts::WikiTemplateId;
+use llm_wiki::{WikiEngine, WriteTopicSourceRequest};
+use orchestrator_agent_rs::test_support::ScriptedGateway;
+use orchestrator_agent_rs::{
+    AgentDefinition, AgentMode, LlmBackend, LlmConfig, LlmProviderConfig, Orchestrator,
+    OrchestratorConfig, ProviderAuth, SecretString,
+};
+use orchestrator_task_rs::{
+    CreateScheduleRequest, CreateTaskRequest, Priority, ScheduleActionKind, ScheduleFilter,
+    TaskConfig, TaskEvent, TaskFeedItem, TaskFilter, TaskManager, TaskRuntimeConfig, TaskScope,
+    TaskSource, TaskStatus, WikiAutoFlowBinding, WorkspaceLayout,
+};
+use serde_json::json;
+use tokio::sync::Notify;
+
+fn test_llm_config() -> LlmConfig {
+    LlmConfig {
+        providers: vec![LlmProviderConfig {
+            id: "test".to_string(),
+            backend: LlmBackend::OpenAiCompatible,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
+            request_timeout: Duration::from_secs(10),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn two_phase_init_voice_catalog_and_task_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a helpful test agent.").unwrap();
+
+    // PHA 1: Prepare TaskManager trên file tasks.db riêng
+    let runtime_cfg = TaskRuntimeConfig {
+        scheduler_tick: Duration::from_millis(50),
+        autoflow_poll_interval: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let task_cfg = TaskConfig::new(dir.path().join("task_store"))
+        .with_default_target("daily", "daily_root")
+        .with_runtime(runtime_cfg);
+
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    // Xây dựng daily_orch (Flow 2) có đăng ký các reminder HostTool từ Pha 1
+    let daily_gw = ScriptedGateway::new();
+    daily_gw.push_text("Báo cáo phân tích đã hoàn tất.");
+
+    let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Trợ lý hằng ngày: tra cứu Wiki, tạo báo cáo và quản lý nhắc nhở.")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools([
+            "reminder_create",
+            "reminder_list",
+            "reminder_complete",
+            "reminder_delete",
+        ]);
+
+    let mut daily_builder = Orchestrator::builder(OrchestratorConfig::new(
+        test_llm_config(),
+        vec![daily_agent],
+        dir.path().join("daily_store"),
+    ))
+    .with_gateway(daily_gw.clone());
+
+    for tool in task_init.reminder_host_tools() {
+        daily_builder = daily_builder.register_tool(tool);
+    }
+    let daily_orch = Arc::new(daily_builder.build().await.unwrap());
+
+    // Xây dựng wiki_orch (Flow 1)
+    let wiki_gw = ScriptedGateway::new();
+    wiki_gw.push_text("Đã biên dịch xong nguồn mới vào Wiki.");
+
+    let wiki_agent = AgentDefinition::new("wiki_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Bộ điều phối thu thập nguồn ngoài và biên dịch/kiểm toán Wiki.")
+        .with_prompt_path(&prompt_path);
+
+    let wiki_orch = Arc::new(
+        Orchestrator::builder(OrchestratorConfig::new(
+            test_llm_config(),
+            vec![wiki_agent],
+            dir.path().join("wiki_store"),
+        ))
+        .with_gateway(wiki_gw.clone())
+        .build()
+        .await
+        .unwrap(),
+    );
+
+    // PHA 2: Gắn cả 2 Flow và start TaskManager
+    let task_mgr = task_init
+        .register_flow("daily", daily_orch.clone())
+        .register_flow("wiki", wiki_orch.clone())
+        .start()
+        .await
+        .unwrap();
+
+    // Kiểm tra catalog động cho Voice Agent
+    let suite = task_mgr.voice_tool_suite();
+    let agents = suite.available_agents();
+    assert_eq!(agents.len(), 2);
+
+    let specs = suite.voice_task_tool_specs();
+    let create_spec = specs.iter().find(|s| s.name == "task_create").unwrap();
+    assert!(create_spec.description.contains("daily_root"));
+    assert!(create_spec.description.contains("wiki_root"));
+
+    // Mở subscription cho UI View Task trước khi Voice Agent tạo task
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    // Voice Agent gọi `task_create` (Fire-and-Forget) chọn `daily_root`
+    let created_json = suite
+        .execute_raw(
+            "task_create",
+            json!({
+                "title": "Phân tích chiến lược DCA",
+                "prompt": "Hãy tổng hợp các điểm chính của chiến lược DCA",
+                "target_agent": "daily_root",
+                "related_wiki_links": ["[[concepts/dca]]"]
+            }),
+        )
+        .await
+        .unwrap();
+
+    let task_id = created_json["task_id"].as_str().unwrap().to_string();
+    assert_eq!(created_json["flow_id"], "daily");
+    assert_eq!(created_json["agent_id"], "daily_root");
+
+    // Chờ sự kiện TaskTerminal từ Watcher
+    let mut finished_task = None;
+    for _ in 0..30 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if task.id == task_id {
+                finished_task = Some(task);
+                break;
+            }
+        }
+    }
+
+    let final_view = finished_task.expect("task should reach terminal Completed state");
+    assert_eq!(final_view.status, TaskStatus::Completed);
+    assert_eq!(final_view.owner_id, "personal");
+    assert_eq!(final_view.workspace_id, "homelab");
+    assert_eq!(
+        final_view.output_preview.as_deref(),
+        Some("Báo cáo phân tích đã hoàn tất.")
+    );
+
+    // Kiểm tra TaskDetailView cho UI View Task
+    let detail = task_mgr.get_task_detail(&task_id).await.unwrap();
+    assert_eq!(detail.task.status, TaskStatus::Completed);
+    assert!(detail.family_snapshot.is_some());
+
+    let page = task_mgr.list_tasks(&TaskFilter::default()).await.unwrap();
+    assert_eq!(page.total, 1);
+
+    task_mgr.shutdown().await.unwrap();
+    daily_orch.shutdown().await.unwrap();
+    wiki_orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn schedule_reminder_and_managed_autoflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = WorkspaceLayout::new(dir.path());
+    layout.ensure_dirs().unwrap();
+    let prompt_path = layout.prompts_dir().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a helpful test agent.").unwrap();
+
+    // Khởi tạo WikiEngine từ `layout.wiki_vault_dir()`
+    let engine = Arc::new(WikiEngine::open(layout.wiki_vault_dir()).unwrap());
+    engine.apply_template(WikiTemplateId::Research).unwrap();
+    let autoflow_notify = Arc::new(Notify::new());
+
+    let runtime_cfg = TaskRuntimeConfig {
+        scheduler_tick: Duration::from_millis(50),
+        autoflow_poll_interval: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let task_cfg = TaskConfig::from_layout(&layout)
+        .with_default_scope(TaskScope::new("personal", "homelab"))
+        .with_default_target("wiki", "wiki_root")
+        .with_runtime(runtime_cfg);
+
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    let wiki_gw = ScriptedGateway::new();
+    let wiki_agent = AgentDefinition::new("wiki_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Wiki compiler root agent")
+        .with_prompt_path(&prompt_path);
+
+    let wiki_orch = Arc::new(
+        Orchestrator::builder(OrchestratorConfig::new(
+            test_llm_config(),
+            vec![wiki_agent],
+            layout.wiki_orch_store_dir(),
+        ))
+        .with_gateway(wiki_gw.clone())
+        .build()
+        .await
+        .unwrap(),
+    );
+
+    let task_mgr = task_init
+        .register_flow("wiki", wiki_orch.clone())
+        .with_wiki_autoflow(WikiAutoFlowBinding::new(
+            engine.clone(),
+            autoflow_notify.clone(),
+            "wiki",
+            "wiki_root",
+        ))
+        .start()
+        .await
+        .unwrap();
+
+    assert_eq!(task_mgr.store_dir(), layout.tasks_store_dir().as_path());
+    assert_eq!(
+        task_mgr.wiki_vault_dir(),
+        Some(layout.wiki_vault_dir().as_path())
+    );
+
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    // 1. Tạo Reminder (NotifyOnly) với delay 0 giây để kích hoạt ngay
+    let sched = task_mgr
+        .create_schedule(CreateScheduleRequest {
+            title: "Kiểm tra lại rủi ro DCA".to_string(),
+            notes: Some("Xem lại phần drawdown".to_string()),
+            action_kind: ScheduleActionKind::NotifyOnly,
+            target_agent: None,
+            session_mode: orchestrator_task_rs::ScheduleSessionMode::NewSession,
+            priority: Priority::High,
+            related_wiki_links: vec!["[[wiki/syntheses/dca]]".to_string()],
+            due_at_iso: None,
+            delay_seconds: Some(0),
+            cron_expr: None,
+            timezone: None,
+        })
+        .await
+        .unwrap();
+
+    let mut reminder_fired = false;
+    for _ in 0..20 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::ReminderDue { schedule }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if schedule.id == sched.id {
+                reminder_fired = true;
+                break;
+            }
+        }
+    }
+    assert!(reminder_fired, "ReminderDue event should be emitted");
+
+    let completed_reminders = task_mgr
+        .list_schedules(&ScheduleFilter {
+            status: Some("completed".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(completed_reminders.len(), 1);
+
+    // 2. Ghi một file mới vào `sources/` và bắn `autoflow_notify` (mô phỏng `add_to_sources` từ Flow 2)
+    let written = engine
+        .write_topic_source(WriteTopicSourceRequest {
+            topic_folder: "software-architecture/agent-tasks".to_string(),
+            file_stem: Some("background-task-spec".to_string()),
+            title: "Background Task Specification".to_string(),
+            tags: vec!["topic/software-architecture/agent-tasks".to_string()],
+            extra_frontmatter: Vec::new(),
+            header_bullets: Vec::new(),
+            body_heading: None,
+            raw_body: "## Core Architecture\nManaged background tasks on SQLite.".to_string(),
+            preview_chars: Some(300),
+        })
+        .unwrap();
+
+    // Để autoflow dừng lại sau 1 chặng trong test, khi wiki_root chạy xong chúng ta ingest luôn source đó
+    wiki_gw.push_text("Auto-Flow cycle completed.");
+    autoflow_notify.notify_one();
+
+    let mut autoflow_task_created = None;
+    for _ in 0..30 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskCreated { task }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if task.source == TaskSource::Autoflow {
+                autoflow_task_created = Some(task);
+                break;
+            }
+        }
+    }
+
+    let af_task = autoflow_task_created.expect("Auto-Flow should create a first-class Task");
+    assert_eq!(af_task.source, TaskSource::Autoflow);
+    assert_eq!(af_task.flow_id, "wiki");
+    assert_eq!(af_task.agent_id, "wiki_root");
+    assert!(af_task.prompt.contains(&written.info.scoped_path));
+
+    let _ = CreateTaskRequest::new("noop", "noop").with_source(TaskSource::Api);
+
+    task_mgr.shutdown().await.unwrap();
+    wiki_orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_tool_inside_daily_orch_and_followup_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are daily_root.").unwrap();
+
+    let task_cfg =
+        TaskConfig::new(dir.path().join("task_store")).with_default_target("daily", "daily_root");
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    let daily_gw = ScriptedGateway::new();
+    // Turn 1 của daily_root: gọi HostTool `reminder_create` rồi kết thúc turn 1
+    daily_gw.push_tool_calls(
+        "Creating reminder",
+        vec![(
+            "call_rem_1",
+            "reminder_create",
+            json!({
+                "title": "Review Wiki Graph",
+                "due_at": "2026-12-01T09:00:00+07:00",
+                "priority": "high",
+                "related_wiki_links": ["[[wiki/index]]"]
+            }),
+        )],
+    );
+    daily_gw.push_text("Đã tạo nhắc nhở Review Wiki Graph.");
+    // Turn 2 (tự động chạy từ followup):
+    daily_gw.push_text("Đã thực hiện thêm yêu cầu followup.");
+
+    let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily assistant")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools([
+            "reminder_create",
+            "reminder_list",
+            "reminder_complete",
+            "reminder_delete",
+        ]);
+
+    let mut daily_builder = Orchestrator::builder(OrchestratorConfig::new(
+        test_llm_config(),
+        vec![daily_agent],
+        dir.path().join("daily_store"),
+    ))
+    .with_gateway(daily_gw.clone());
+
+    for tool in task_init.reminder_host_tools() {
+        daily_builder = daily_builder.register_tool(tool);
+    }
+    let daily_orch = Arc::new(daily_builder.build().await.unwrap());
+
+    let task_mgr = task_init
+        .register_flow("daily", daily_orch.clone())
+        .start()
+        .await
+        .unwrap();
+
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    let task = task_mgr
+        .create_task(
+            CreateTaskRequest::new("Tạo lịch nhắc", "Nhắc tôi xem lại Wiki Graph")
+                .with_source(TaskSource::Voice),
+        )
+        .await
+        .unwrap();
+
+    // Đợi Task hoàn tất Turn 1
+    for _ in 0..30 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if t.id == task.id {
+                assert_eq!(t.status, TaskStatus::Completed);
+                break;
+            }
+        }
+    }
+
+    // Kiểm tra reminder đã được tạo thông qua HostTool bên trong daily_orch
+    let reminders = task_mgr
+        .list_schedules(&ScheduleFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(reminders.len(), 1);
+    assert_eq!(reminders[0].title, "Review Wiki Graph");
+
+    // Gửi tiếp 1 Followup vào Task vừa hoàn tất -> tự động kích hoạt Turn 2
+    let fu = task_mgr
+        .send_followup(&task.id, "Bổ sung thêm ghi chú nhé", TaskSource::Api)
+        .await
+        .unwrap();
+    assert_eq!(fu.task_id, task.id);
+
+    for _ in 0..30 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if t.id == task.id {
+                assert_eq!(
+                    t.output_preview.as_deref(),
+                    Some("Đã thực hiện thêm yêu cầu followup.")
+                );
+                break;
+            }
+        }
+    }
+
+    task_mgr.shutdown().await.unwrap();
+    daily_orch.shutdown().await.unwrap();
+}

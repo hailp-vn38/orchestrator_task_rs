@@ -1,0 +1,3 @@
+# Represent Wiki Auto-Flow Runs as First-Class Tasks
+
+When `add_to_sources` or external collectors add new Markdown files to `sources/`, Flow 1 (`wiki_orch`) must run `wiki_ingestor` and `wiki_curator` in the background. Instead of running an unrecorded background `loop` that calls `wiki_orch.submit(...)` invisibly, the Auto-Flow coordinator creates a standard `Task` record (`source = "autoflow"`) in `tasks.db` for each `build_next_autoflow_prompt` cycle and tracks it through the same `Subscription` watcher as user-created Tasks. This makes every LLM-consuming background compilation visible, inspectable, and cancellable in the Task View UI and ensures crash recovery reconciles interrupted Auto-Flow runs on startup.

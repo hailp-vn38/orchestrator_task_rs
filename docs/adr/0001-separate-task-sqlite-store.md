@@ -1,0 +1,3 @@
+# Separate SQLite Store (`tasks.db`) for Task and Schedule State
+
+`orchestrator_task_rs` coordinates background Tasks across multiple `Orchestrator` instances (`daily` and `wiki`) alongside `WikiEngine`, each of which already owns a dedicated SQLite database and exclusive process lock (`orchestrator.db` and the QMD index). We store all Task, Followup, and Schedule state in a separate `tasks.db` file with its own `tasks.owner.lock` rather than sharing or extending `orchestrator.db`. This prevents schema migration coupling with `orchestrator_agent_rs`, avoids SQLite WAL write-lock contention during active turn execution, and lets the Task View UI query unified cross-Flow task projections in a single read query.

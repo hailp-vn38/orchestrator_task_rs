@@ -1,0 +1,216 @@
+//! Watcher theo dõi tiến độ từng Task đang chạy qua `Orchestrator::subscribe`
+//! và cập nhật live `progress_summary` + tự động xử lý `task_followups` khi turn hoàn tất.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use orchestrator_agent_rs::{ExecutionEvent, FeedItem};
+
+use crate::runtime::{lock, SharedTaskCore};
+use crate::store::{now_ms, ProgressUpdate};
+use crate::types::{TaskEvent, TaskScope, TaskStatus, TaskView};
+
+/// Đảm bảo có đúng 1 watcher task đang chạy cho `task.id`.
+pub(crate) fn ensure_task_watcher(core: Arc<SharedTaskCore>, task: TaskView) {
+    let mut guards = lock(&core.active_watchers);
+    guards.retain(|_, h| !h.is_finished());
+    if guards.contains_key(&task.id) {
+        return;
+    }
+    let task_id = task.id.clone();
+    let task_id_key = task_id.clone();
+    let core_clone = Arc::clone(&core);
+    let handle = tokio::spawn(async move {
+        run_task_watcher(core_clone.clone(), task).await;
+        lock(&core_clone.active_watchers).remove(&task_id);
+    });
+    guards.insert(task_id_key, handle);
+}
+
+async fn run_task_watcher(core: Arc<SharedTaskCore>, initial_task: TaskView) {
+    let Ok(flows) = core.flows() else {
+        return;
+    };
+    let Ok(orch) = flows.get_flow(&initial_task.flow_id).cloned() else {
+        return;
+    };
+    let scope = TaskScope::new(&initial_task.owner_id, &initial_task.workspace_id);
+    let caller = scope.to_caller_context();
+    let refresh_interval = orch.snapshot_refresh_interval().min(Duration::from_secs(2));
+
+    loop {
+        if core.shutdown.is_cancelled() {
+            return;
+        }
+
+        // Mở subscription TRƯỚC khi kiểm tra trạng thái để không bỏ lỡ terminal event
+        let mut sub_opt = orch.subscribe(&caller, &initial_task.session_id).await.ok();
+
+        // Kiểm tra xem turn đã xong chưa (hoặc có followup tiếp theo cần đẩy vào không)
+        let Ok(Some(current_task)) = core.store.get_task_unscoped(&initial_task.id).await else {
+            return;
+        };
+        if current_task.status.is_terminal() {
+            return;
+        }
+        if let Ok(true) = core.settle_or_advance_task(&current_task).await {
+            return;
+        }
+
+        let Some(ref mut sub) = sub_opt else {
+            tokio::select! {
+                () = core.shutdown.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_millis(200)) => continue,
+            }
+        };
+
+        let mut tick = tokio::time::interval(refresh_interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                biased;
+                () = core.shutdown.cancelled() => return,
+                item = sub.recv() => match item {
+                    Some(FeedItem::Event(ev)) => {
+                        let is_run_terminal = handle_execution_event(&core, &initial_task, &ev).await;
+                        if is_run_terminal {
+                            if let Ok(Some(latest)) = core.store.get_task_unscoped(&initial_task.id).await {
+                                if latest.status.is_terminal() {
+                                    return;
+                                }
+                                if let Ok(true) = core.settle_or_advance_task(&latest).await {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Some(FeedItem::ResyncRequired) | None => {
+                        break;
+                    }
+                },
+                _ = tick.tick() => {
+                    if let Ok(Some(latest)) = core.store.get_task_unscoped(&initial_task.id).await {
+                        if latest.status.is_terminal() {
+                            return;
+                        }
+                        if let Ok(true) = core.settle_or_advance_task(&latest).await {
+                            return;
+                        }
+                    } else {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_execution_event(
+    core: &SharedTaskCore,
+    task: &TaskView,
+    ev: &ExecutionEvent,
+) -> bool {
+    match ev.event_type.as_str() {
+        "tool.started" => {
+            let tool_name = ev
+                .payload
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool");
+            let subagent = if tool_name == "subagent" {
+                ev.payload
+                    .get("arguments")
+                    .and_then(|a| a.get("agent"))
+                    .and_then(|v| v.as_str())
+            } else {
+                None
+            };
+            let summary = if let Some(sa) = subagent {
+                let desc = ev
+                    .payload
+                    .get("arguments")
+                    .and_then(|a| a.get("description"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("working");
+                format!("Subagent '{sa}': {desc}")
+            } else {
+                format!("Running tool '{tool_name}'...")
+            };
+
+            let _ = core
+                .store
+                .update_task_progress(
+                    &task.id,
+                    ProgressUpdate {
+                        active_subagent: subagent,
+                        active_tool: Some(tool_name),
+                        progress_summary: Some(&summary),
+                    },
+                )
+                .await;
+            core.event_bus.emit(TaskEvent::TaskProgress {
+                task_id: task.id.clone(),
+                owner_id: task.owner_id.clone(),
+                workspace_id: task.workspace_id.clone(),
+                status: TaskStatus::Running,
+                active_subagent: subagent.map(str::to_string),
+                active_tool: Some(tool_name.to_string()),
+                progress_summary: Some(summary),
+                timestamp_ms: now_ms(),
+            });
+            false
+        }
+        "tool.progress" => {
+            if let Some(msg) = ev.payload.get("message").and_then(|v| v.as_str()) {
+                let _ = core
+                    .store
+                    .update_task_progress(
+                        &task.id,
+                        ProgressUpdate {
+                            active_subagent: None,
+                            active_tool: None,
+                            progress_summary: Some(msg),
+                        },
+                    )
+                    .await;
+                core.event_bus.emit(TaskEvent::TaskProgress {
+                    task_id: task.id.clone(),
+                    owner_id: task.owner_id.clone(),
+                    workspace_id: task.workspace_id.clone(),
+                    status: TaskStatus::Running,
+                    active_subagent: None,
+                    active_tool: None,
+                    progress_summary: Some(msg.to_string()),
+                    timestamp_ms: now_ms(),
+                });
+            }
+            false
+        }
+        "tool.completed" => {
+            let tool_name = ev
+                .payload
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool");
+            let summary = format!("Completed tool '{tool_name}'");
+            let _ = core
+                .store
+                .update_task_progress(
+                    &task.id,
+                    ProgressUpdate {
+                        active_subagent: None,
+                        active_tool: None,
+                        progress_summary: Some(&summary),
+                    },
+                )
+                .await;
+            false
+        }
+        "run.completed" | "run.failed" | "run.cancelled" | "run.interrupted" => {
+            // Chỉ coi là terminal của Root Task khi event thuộc chính Root session của Task
+            ev.session_id == task.session_id
+        }
+        _ => false,
+    }
+}

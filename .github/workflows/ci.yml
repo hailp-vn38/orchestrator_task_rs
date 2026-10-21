@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: orchestrator_task_rs
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: orchestrator_task_rs
+          persist-credentials: false
+
+      # Keep sibling paths consistent with Cargo.toml. Pin dependency revisions
+      # so upstream changes cannot silently change this project's CI inputs.
+      - name: Checkout orchestrator-agent
+        uses: actions/checkout@v4
+        with:
+          repository: hailp-vn38/orchestrator_agent_rs
+          ref: 2178d207e341fc6e52e60de6854b1fcddc6752ca
+          path: orchestrator_agent_rs
+          token: ${{ secrets.DEPENDENCIES_READ_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Checkout llm-wiki-rs
+        uses: actions/checkout@v4
+        with:
+          repository: hailp-vn38/wiki-llm-rust
+          ref: 3558ed7b6f1f9af58743ece05c04324a7748f68f
+          path: llm-wiki-rs
+          token: ${{ secrets.DEPENDENCIES_READ_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+
+      - name: Check formatting
+        run: cargo +stable fmt --package orchestrator-task -- --check
+
+      - name: Check all targets
+        run: cargo +stable check --locked --all-targets
+
+      - name: Clippy
+        run: cargo +stable clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo +stable test --locked --all-targets
+
+      - name: Test documentation
+        run: cargo +stable test --locked --doc
