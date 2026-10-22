@@ -85,8 +85,19 @@ use orchestrator_task_rs::{
     // Quản lý vòng đời & Điều phối trung tâm
     TaskManager, TaskManagerInit, WikiAutoFlowBinding,
 
-    // Bộ công cụ cho Voice Agent & HostTool
-    TaskToolSpec, TaskToolSuite,
+    // Bộ công cụ cho Voice Agent, HostTool & WorkspaceToolKit
+    add_to_sources_host_tool, build_sample_technical_pdf, convert_document_with_anydoc,
+    fetch_playlist, fetch_transcript, pdf_host_tools, report_host_tools, wiki_host_tools,
+    wiki_readonly_host_tools, youtube_host_tools, AddToSourcesTool, AnydocInspectPdfTool,
+    AnydocSaveToSourcesTool, ConvertedPdfDoc, MarkdownCreateTool, MarkdownReadTool,
+    PlaylistVideoEntry, SharedPdfState, TaskToolSpec, TaskToolSuite, WikiEngineBridgeTool,
+    WorkspaceToolKit, YoutubeCollectorEnv, YtFetchTranscriptTool, YtListPlaylistTool, WorkspaceToolKit,
+    add_to_sources_host_tool, build_sample_technical_pdf, convert_document_with_anydoc,
+    fetch_playlist, fetch_transcript, pdf_host_tools, report_host_tools, wiki_host_tools,
+    wiki_readonly_host_tools, youtube_host_tools,
+    AddToSourcesTool, AnydocInspectPdfTool, AnydocSaveToSourcesTool, ConvertedPdfDoc,
+    MarkdownCreateTool, MarkdownReadTool, PlaylistVideoEntry, SharedPdfState,
+    WikiEngineBridgeTool, YoutubeCollectorEnv, YtFetchTranscriptTool, YtListPlaylistTool,
 
     // Kiểu dữ liệu miền (Scope, Task, Followup, Agent Execution, Schedule/Reminder, Event)
     AgentCatalogEntry, CreateScheduleRequest, CreateTaskRequest,
@@ -96,7 +107,7 @@ use orchestrator_task_rs::{
     TaskAgentMessageView, TaskAgentRunView, TaskAgentSessionView,
     TaskDetailView, TaskEvent, TaskExecutionSummary, TaskFeedItem, TaskFilter,
     TaskMessageToolCallView, TaskPage, TaskScope, TaskSource, TaskStatus,
-    TaskSubscription, TaskToolInvocationView, TaskView,
+    TaskSubscription, TaskToolInvocationView, TaskView, WikiDeleteOutcome,
 };
 ```
 
@@ -295,11 +306,13 @@ impl TaskManager {
 
 | Phương thức | Chữ ký | Mô tả |
 | --- | --- | --- |
+| `task_host_tools` | `pub fn task_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Xuất 6 `HostTool` nhóm `task_*` (`task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `task_delete`) trước khi gọi `OrchestratorBuilder::build()`. |
 | `reminder_host_tools` | `pub fn reminder_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Xuất 4 `HostTool` (`reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`) để đăng ký vào `OrchestratorBuilder` (thường cho subagent `reminder_planner`). |
-| `all_host_tools` | `pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Xuất toàn bộ 8 `HostTool` (`task_create`, `task_followup`, `task_list`, `task_cancel`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`). |
+| `all_host_tools` | `pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Xuất toàn bộ 10 `HostTool` (`task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `task_delete`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`). |
 | `with_orchestrator` | `pub fn with_orchestrator(self, orchestrator: Arc<Orchestrator>) -> Self` | Gắn một instance `Orchestrator` hợp nhất dưới tên Flow mặc định `DEFAULT_FLOW_ID` (`"default"`). |
 | `register_flow` | `pub fn register_flow(self, flow_id: impl Into<String>, orchestrator: Arc<Orchestrator>) -> Self` | Gắn một instance `Orchestrator` với định danh `flow_id` cụ thể (VD: `"daily"`, `"wiki"`). Có thể gọi nhiều lần cho nhiều Flow. |
-| `with_wiki_autoflow` | `pub fn with_wiki_autoflow(self, binding: WikiAutoFlowBinding) -> Self` | Gắn cầu nối `WikiAutoFlowBinding` để tự động chuyển tín hiệu `autoflow_notify` hoặc nguồn mới trong `sources/` thành Task trên Flow biên dịch Wiki. |
+| `with_wiki_autoflow` | `pub fn with_wiki_autoflow(self, binding: WikiAutoFlowBinding) -> Self` | Gắn cầu nối `WikiAutoFlowBinding` để tự động chuyển tín hiệu `autoflow_notify` hoặc nguồn mới trong `sources/` thành Task trên Flow biên dịch Wiki (đồng thời tự động đăng ký `binding.engine` vào `TaskManager`). |
+| `with_wiki_engine` | `pub fn with_wiki_engine(self, engine: Arc<WikiEngine>) -> Self` | Gắn trực tiếp `Arc<WikiEngine>` vào `TaskManager` để dùng cho các thao tác quản trị vault (`delete_wiki_file`, `delete_source_file`, `wiki_engine()`) ngay cả khi không bật Wiki Auto-Flow. |
 | `start` | `pub async fn start(self) -> TaskResult<Arc<TaskManager>>` | Chuyển sang Pha 2: kiểm tra Flow/Agent, đồng bộ (reconcile) các Task đang dở dang và khởi chạy các background worker. |
 
 > **Lưu ý khi gọi `HostTool` trước `start()`:** Nếu một `HostTool` được thực thi trước khi `TaskManagerInit::start()` hoàn tất, các thao tác cần `FlowRegistry` (như `task_create`) sẽ trả lỗi `ErrorCode::NotReady`. Ở Pha 1 (`prepare`), `HostTool::descriptor()` dùng fallback schema hợp lệ để vượt qua bước kiểm tra của `OrchestratorBuilder::build()`; sau khi `start()`, `descriptor()` tự động trả về schema có đính kèm danh mục `target_agent` động.
@@ -351,8 +364,10 @@ impl TaskManager {
 | `send_followup_scoped` | `pub async fn send_followup_scoped(&self, scope: &TaskScope, task_id: &str, prompt: impl Into<String>, source: TaskSource) -> TaskResult<FollowupView>` | Gửi Followup vào Task thuộc `scope` chỉ định. |
 | `cancel_task` | `pub async fn cancel_task(&self, task_id: &str) -> TaskResult<TaskView>` | Hủy Task đang chạy/xếp hàng trong `default_scope` và hủy mọi Followup đang chờ của Task đó. |
 | `cancel_task_scoped` | `pub async fn cancel_task_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<TaskView>` | Hủy Task trong `scope` chỉ định. |
-| `delete_task` | `pub async fn delete_task(&self, task_id: &str) -> TaskResult<()>` | Xóa bản ghi Task trong `default_scope` (tự động cancel trước nếu Task chưa kết thúc; xóa dây chuyền `ON DELETE CASCADE` các `task_followups`). |
-| `delete_task_scoped` | `pub async fn delete_task_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<()>` | Xóa bản ghi Task trong `scope` chỉ định. |
+| `delete_task` | `pub async fn delete_task(&self, task_id: &str) -> TaskResult<()>` | Xóa vĩnh viễn Task trong `default_scope`: tự động cancel và dừng watcher nếu Task chưa kết thúc, xóa dây chuyền `ON DELETE CASCADE` các `task_followups` trong `tasks.db`, xóa luôn `Orchestrator` session tương ứng (nếu không còn Task nào khác dùng chung `session_id`), và phát sự kiện `TaskEvent::TaskDeleted`. |
+| `delete_task_scoped` | `pub async fn delete_task_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<()>` | Xóa vĩnh viễn Task + `Orchestrator` session trong `scope` chỉ định và phát `TaskEvent::TaskDeleted`. |
+| `delete_wiki_file` | `pub async fn delete_wiki_file(&self, rel_path: &str) -> TaskResult<WikiDeleteOutcome>` | Xóa một trang Markdown trong `wiki/` (VD: `"concepts/rust.md"` hoặc `"wiki/concepts/rust.md"`), xóa vector/FTS5 chunks trong `.wiki/index.sqlite` và đồng bộ lại `wiki/index.md`. |
+| `delete_source_file` | `pub async fn delete_source_file(&self, rel_path: &str, delete_wiki_mirror: bool) -> TaskResult<WikiDeleteOutcome>` | Xóa một tài liệu nguồn trong `sources/` (VD: `"guide.md"` hoặc `"sources/guide.md"`), xóa chunks chỉ mục; nếu `delete_wiki_mirror = true` thì xóa luôn trang mirror `wiki/sources/<slug>.md` và đồng bộ lại `wiki/index.md`. |
 
 ### 5.2. Cơ chế Phân giải `target_agent`
 
@@ -494,6 +509,31 @@ pub struct FollowupView {
 }
 ```
 
+### 5.5. Xóa dữ liệu Task, Wiki và Source (`WikiDeleteOutcome`)
+
+Bên cạnh `delete_task` / `delete_task_scoped` (xóa đồng bộ cả bản ghi trong `tasks.db`, dọn sạch session/messages/runs trong `orchestrator.db` và phát `TaskEvent::TaskDeleted`), `TaskManager` cung cấp API quản trị để xóa trực tiếp các trang Wiki (`wiki/`) và tài liệu nguồn (`sources/`) thông qua `WikiEngine` đã gắn (hoặc tự động mở từ `TaskConfig::wiki_vault_dir`):
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiDeleteOutcome {
+    /// Đường dẫn tương đối đã chuẩn hóa trong vault (VD: "wiki/concepts/rust.md" hoặc "sources/guide.md").
+    pub rel_path: String,
+    /// `true` nếu file hoặc bản ghi index tồn tại và đã được xóa.
+    pub deleted: bool,
+    /// Số lượng chunks tìm kiếm (FTS5 / vector) đã xóa khỏi `.wiki/index.sqlite`.
+    pub removed_chunks: usize,
+    /// Đường dẫn trang mirror `wiki/sources/<slug>.md` đã được xóa kèm (nếu gọi `delete_source_file(..., true)`).
+    pub mirror_wiki_rel_path: Option<String>,
+    /// `true` nếu `wiki/index.md` đã được đồng bộ / dựng lại sau khi xóa.
+    pub index_synced: bool,
+}
+```
+
+> Ngoài ra, trên crate `llm_wiki` (`WikiEngine`), bạn cũng có thể gọi trực tiếp:
+> - `wiki_engine.delete_wiki_file("concepts/rust.md")`
+> - `wiki_engine.delete_source_file("guide.md", true)`
+> - `wiki_engine.delete_file(CollectionScope::Wiki | CollectionScope::Sources, rel_path, DeleteOptions { delete_wiki_mirror })`
+
 ---
 
 ## 6. Truy Vấn Trạng Thái & Quan Sát Thời Gian Thực (`get_task`, `get_task_detail`, `list_tasks`, `subscribe`)
@@ -506,6 +546,7 @@ pub struct FollowupView {
 | --- | --- | --- |
 | `store_dir` | `pub fn store_dir(&self) -> &Path` | Đường dẫn thư mục chứa `tasks.db` và `tasks.owner.lock`. |
 | `wiki_vault_dir` | `pub fn wiki_vault_dir(&self) -> Option<&Path>` | Đường dẫn thư mục gốc của Wiki Vault nếu đã cấu hình trong `TaskConfig`. |
+| `wiki_engine` | `pub fn wiki_engine(&self) -> Option<Arc<WikiEngine>>` | Lấy `Arc<WikiEngine>` đã gắn qua `with_wiki_autoflow` hoặc `with_wiki_engine`. |
 | `voice_tool_suite` | `pub fn voice_tool_suite(&self) -> TaskToolSuite` | Lấy `TaskToolSuite` để xuất JSON Schema / thực thi Raw JSON cho Voice Agent hoặc lấy `HostTool`. |
 | `available_agents` | `pub fn available_agents(&self) -> Vec<AgentCatalogEntry>` | Danh sách tất cả Root/Primary Agents khả dụng kèm mô tả từ mọi Flow đã đăng ký. |
 | `get_task` | `pub async fn get_task(&self, task_id: &str) -> TaskResult<TaskView>` | Lấy `TaskView` theo `task_id` trên `default_scope` (`ErrorCode::NotFound` nếu không tồn tại hoặc khác scope). |
@@ -703,6 +744,12 @@ pub enum TaskEvent {
     TaskTerminal {
         task: TaskView,
     },
+    TaskDeleted {
+        task_id: String,
+        session_id: String,
+        owner_id: String,
+        workspace_id: String,
+    },
     FollowupQueued {
         task_id: String,
         followup_id: String,
@@ -725,6 +772,7 @@ pub enum TaskEvent {
 | `TaskProgress` | `"task_progress"` | Khi Watcher nhận được `tool.started` (kèm tên subagent/tool đang chạy) hoặc `tool.progress` từ `Orchestrator`. |
 | `TaskExecutionStream` | `"task_execution_stream"` | Chuyển tiếp nguyên vẹn mọi `ExecutionEvent` từ `Orchestrator` (`text.delta`, `step.started`, `tool.started`, `tool.completed`, `run.completed`, ...) kèm `task_id` và `flow_id`. |
 | `TaskTerminal` | `"task_terminal"` | Khi Task chuyển sang trạng thái kết thúc (`Completed`, `Failed`, `Cancelled`, `Interrupted`) và không còn Followup nào đang chờ. |
+| `TaskDeleted` | `"task_deleted"` | Khi Task bị xóa vĩnh viễn qua `delete_task`, `delete_task_scoped` hoặc tool `task_delete` (kèm `session_id` đã dọn dẹp). |
 | `FollowupQueued` | `"followup_queued"` | Khi một Followup được xếp vào hàng đợi vì Task đang chạy (`Running`). |
 | `ReminderDue` | `"reminder_due"` | Khi một Schedule có `action_kind = NotifyOnly` (Reminder) đến hạn. |
 | `ScheduleTriggered` | `"schedule_triggered"` | Khi một Schedule có `action_kind = SpawnTask` đến hạn và đã khởi tạo thành công một Task mới (`spawned_task_id`). |
@@ -909,14 +957,52 @@ pub struct TaskToolSuite { /* private fields */ }
 | Phương thức trên `TaskToolSuite` | Chữ ký | Mô tả |
 | --- | --- | --- |
 | `available_agents` | `pub fn available_agents(&self) -> Vec<AgentCatalogEntry>` | Danh sách các Primary/Root Agents khả dụng từ mọi Flow đã đăng ký. |
-| `tool_specs` | `pub fn tool_specs(&self) -> Vec<TaskToolSpec>` | Trả về toàn bộ **9 Tool Specs** (`task_*` + `reminder_*`), tự động nhúng `enum` và mô tả các `target_agent` khả dụng vào `task_create` và `reminder_create`. |
-| `voice_task_tool_specs` | `pub fn voice_task_tool_specs(&self) -> Vec<TaskToolSpec>` | Chỉ trả về **5 Tool Specs** nhóm `task_*` (`task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`). |
+| `tool_specs` | `pub fn tool_specs(&self) -> Vec<TaskToolSpec>` | Trả về toàn bộ **10 Tool Specs** (`task_*` + `reminder_*`), tự động nhúng `enum` và mô tả các `target_agent` khả dụng vào `task_create` và `reminder_create`. |
+| `voice_task_tool_specs` | `pub fn voice_task_tool_specs(&self) -> Vec<TaskToolSpec>` | Chỉ trả về **6 Tool Specs** nhóm `task_*` (`task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `task_delete`). |
 | `execute_raw` | `pub async fn execute_raw(&self, tool_name: &str, args: Value) -> TaskResult<Value>` | Thực thi tool bất kỳ bằng Raw JSON trên `default_scope`. |
 | `execute_raw_scoped` | `pub async fn execute_raw_scoped(&self, scope: &TaskScope, tool_name: &str, args: Value) -> TaskResult<Value>` | Thực thi tool bất kỳ bằng Raw JSON trên `scope` chỉ định. |
+| `task_host_tools` | `pub fn task_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Xuất 6 `HostTool` nhóm `task_*`. |
 | `reminder_host_tools` | `pub fn reminder_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Xuất 4 `HostTool` nhóm `reminder_*`. |
-| `all_host_tools` | `pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Xuất toàn bộ 9 `HostTool` (`task_*` + `reminder_*`). |
+| `all_host_tools` | `pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Xuất toàn bộ 10 `HostTool` (`task_*` + `reminder_*`). |
 
-### 8.2. Đặc tả Chi tiết 9 Tools (JSON Arguments & Output)
+### 8.1b. Bộ Công Cụ Tái Sử Dụng Cấp Workspace (`WorkspaceToolKit` & `HostTool` Mở Rộng)
+
+Để Host không phải tự viết lại các `HostTool` khi tích hợp kiến trúc Dual-Flow, crate cung cấp sẵn [`WorkspaceToolKit`](../src/tools/toolkit.rs) và các hàm khởi tạo trực tiếp tại gốc crate:
+
+```rust
+let toolkit = WorkspaceToolKit::from_layout(&layout, engine.clone(), autoflow_notify.clone())
+    .with_context_limit_tokens(200_000)
+    .with_youtube_options("en,vi", usize::MAX);
+
+// 1. Trường hợp 1 Orchestrator hợp nhất (gồm cả daily_root và wiki_root):
+for tool in toolkit.all_host_tools(&task_init) {
+    builder = builder.register_tool(tool);
+}
+
+// 2. Trường hợp tách riêng 2 Orchestrator (daily_orch & wiki_orch):
+for tool in toolkit.daily_flow_host_tools(&task_init) {
+    daily_builder = daily_builder.register_tool(tool);
+}
+for tool in toolkit.wiki_flow_host_tools() {
+    wiki_builder = wiki_builder.register_tool(tool);
+}
+```
+
+| Phương thức trên `WorkspaceToolKit` / Hàm rời | Các `HostTool` trả về | Mô tả |
+| --- | --- | --- |
+| `toolkit.wiki_host_tools()` / `wiki_host_tools(engine, read_budget)` | 14 tools `wiki_*` | Toàn bộ công cụ `ReadOnly` và `Mutating` của `WikiEngine` qua `WikiEngineBridgeTool`. |
+| `toolkit.wiki_readonly_host_tools()` / `wiki_readonly_host_tools(engine, read_budget)` | 9 tools `wiki_*` (`ReadOnly`) | Chỉ các công cụ đọc (`wiki_tree`, `wiki_query`, `wiki_get`, `wiki_multi_get`, `wiki_metadata`, `wiki_status`, `wiki_graph_neighbors`, `wiki_lint`, `wiki_schema`). |
+| `toolkit.add_to_sources_host_tool()` / `add_to_sources_host_tool(engine, notify)` | `add_to_sources` | Lưu bài tổng hợp vào `sources/<domain>/<topic>/<slug>.md` và kích hoạt `autoflow_notify`. |
+| `toolkit.report_host_tools()` / `report_host_tools(reports_dir)` | `markdown_create`, `markdown_read` | Xuất và đọc báo cáo Markdown độc lập trong `reports/`. |
+| `toolkit.youtube_host_tools()` / `youtube_host_tools(yt_env)` | `yt_list_playlist`, `yt_fetch_transcript` | Liệt kê video và tải transcript từ YouTube Playlist bằng `yt-dlp`, lưu vào `sources/` kèm báo hiệu Auto-Flow. |
+| `toolkit.pdf_host_tools()` / `pdf_host_tools(pdf_state)` | `anydoc_inspect_pdf`, `anydoc_save_to_sources` | Chuyển đổi PDF/Office sang GFM Markdown bằng `anydoc`, lưu vào `sources/` kèm báo hiệu Auto-Flow. |
+| `toolkit.collector_host_tools()` | 4 tools (`anydoc_*` + `yt_*`) | Toàn bộ công cụ thu thập nguồn bên ngoài cho subagent `source_collector`. |
+| `toolkit.daily_flow_host_tools(&task_init)` | `wiki_*` (read-only) + `add_to_sources` + `markdown_*` + `reminder_*` | Bộ công cụ trọn gói cho Flow 2 (`daily_orch`). |
+| `toolkit.wiki_flow_host_tools()` | `wiki_*` (full) + `anydoc_*` + `yt_*` | Bộ công cụ trọn gói cho Flow 1 (`wiki_orch`). |
+| `toolkit.all_host_tools(&task_init)` | Toàn bộ công cụ của cả 2 Flow + `reminder_*` | Bộ công cụ trọn gói cho mô hình 1 `Orchestrator` hợp nhất. |
+| `toolkit.all_host_tools_with_tasks(&task_init)` | `all_host_tools` + 6 tool `task_*` | Bộ công cụ trọn gói kèm cả 6 tool điều phối `task_*`. |
+
+### 8.2. Đặc tả Chi tiết 10 Tools (JSON Arguments & Output)
 
 #### 1) `task_create` (`ToolEffect::Mutating`)
 Khởi tạo và chạy ngay một Task chạy nền (fire-and-forget, không chờ LLM hoàn tất).
@@ -1017,7 +1103,25 @@ Hủy một Task đang chạy hoặc đang xếp hàng và xóa các Followup đ
   }
   ```
 
-#### 6) `reminder_create` (`ToolEffect::Mutating`)
+#### 6) `task_delete` (`ToolEffect::Mutating`)
+Xóa vĩnh viễn một Task (tự động hủy nếu đang chạy), xóa toàn bộ Followup cùng session `Orchestrator` tương ứng và phát sự kiện `TaskEvent::TaskDeleted`.
+
+- **Arguments JSON**:
+  ```json
+  {
+    "task_id": "d8f1a2..."
+  }
+  ```
+  *(Bắt buộc: `task_id`)*.
+- **Output JSON**:
+  ```json
+  {
+    "task_id": "d8f1a2...",
+    "deleted": true
+  }
+  ```
+
+#### 7) `reminder_create` (`ToolEffect::Mutating`)
 Tạo một lời nhắc người dùng (`notify_only`) hoặc một lịch tự động khởi tạo Task nền (`spawn_task`).
 
 - **Arguments JSON**:
@@ -1052,7 +1156,7 @@ Tạo một lời nhắc người dùng (`notify_only`) hoặc một lịch tự
   }
   ```
 
-#### 7) `reminder_list` (`ToolEffect::ReadOnly`)
+#### 8) `reminder_list` (`ToolEffect::ReadOnly`)
 Liệt kê các lời nhắc và lịch hẹn.
 
 - **Arguments JSON**:
@@ -1073,7 +1177,7 @@ Liệt kê các lời nhắc và lịch hẹn.
   }
   ```
 
-#### 8) `reminder_complete` (`ToolEffect::Mutating`)
+#### 9) `reminder_complete` (`ToolEffect::Mutating`)
 Đánh dấu một lời nhắc hoặc lịch hẹn là đã hoàn tất.
 
 - **Arguments JSON**:
@@ -1093,7 +1197,7 @@ Liệt kê các lời nhắc và lịch hẹn.
   }
   ```
 
-#### 9) `reminder_delete` (`ToolEffect::Mutating`)
+#### 10) `reminder_delete` (`ToolEffect::Mutating`)
 Xóa vĩnh viễn một lời nhắc hoặc lịch hẹn.
 
 - **Arguments JSON**:
@@ -1110,6 +1214,32 @@ Xóa vĩnh viễn một lời nhắc hoặc lịch hẹn.
     "deleted": true
   }
   ```
+
+### 8.3. Bộ Công Cụ Hợp Nhất Mức Workspace (`WorkspaceToolKit`)
+
+Định nghĩa tại [`src/tools/toolkit.rs`](../src/tools/toolkit.rs), [`src/tools/wiki_bridge.rs`](../src/tools/wiki_bridge.rs), [`src/tools/markdown_report.rs`](../src/tools/markdown_report.rs), [`src/tools/pdf.rs`](../src/tools/pdf.rs) và [`src/tools/youtube.rs`](../src/tools/youtube.rs).
+
+`WorkspaceToolKit` đóng gói trọn bộ các `HostTool` cho kiến trúc Dual-Flow (14 tools của `WikiEngine`, `add_to_sources`, `markdown_create` / `markdown_read`, `anydoc_inspect_pdf` / `anydoc_save_to_sources`, `yt_list_playlist` / `yt_fetch_transcript`, và các nhóm `reminder_*` / `task_*` từ `TaskManagerInit`):
+
+| Phương thức trên `WorkspaceToolKit` | Chữ ký | Mô tả |
+| --- | --- | --- |
+| `from_layout` | `pub fn from_layout(layout: &WorkspaceLayout, engine: Arc<WikiEngine>, autoflow_notify: Arc<Notify>) -> Self` | Khởi tạo từ `WorkspaceLayout` (`reports_dir = layout.reports_dir()`, thư mục tạm PDF/YouTube tại `<root>/work/pdf` và `<root>/work/yt`). |
+| `new` | `pub fn new(engine: Arc<WikiEngine>, autoflow_notify: Arc<Notify>, reports_dir: impl Into<PathBuf>, pdf_work_dir: impl Into<PathBuf>, yt_work_dir: impl Into<PathBuf>) -> Self` | Khởi tạo với đường dẫn tùy chỉnh. |
+| `with_read_budget` | `pub fn with_read_budget(self, read_budget: AdaptiveReadBudget) -> Self` | Ghi đè `AdaptiveReadBudget` cho các tool đọc của `WikiEngine`. |
+| `with_context_limit_tokens` | `pub fn with_context_limit_tokens(self, context_limit_tokens: usize) -> Self` | Tính `AdaptiveReadBudget` theo kích thước context window (mặc định `200_000`). |
+| `with_youtube_options` | `pub fn with_youtube_options(self, langs: impl Into<String>, limit: usize) -> Self` | Tùy chỉnh ngôn ngữ phụ đề ưu tiên (VD: `"en,vi"`) và giới hạn số video playlist. |
+| `with_pdf_max_chars` | `pub fn with_pdf_max_chars(self, max_chars: Option<usize>) -> Self` | Giới hạn số ký tự tối đa trích xuất từ mỗi file PDF qua `anydoc`. |
+| `wiki_host_tools` | `pub fn wiki_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Toàn bộ 14 `HostTool` của `WikiEngine` (`ReadOnly` + `Mutating`). |
+| `wiki_readonly_host_tools` | `pub fn wiki_readonly_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Chỉ các `HostTool` `ReadOnly` của `WikiEngine` (cho `wiki_researcher`). |
+| `add_to_sources_host_tool` | `pub fn add_to_sources_host_tool(&self) -> Arc<dyn HostTool>` | Tool `add_to_sources` (lưu báo cáo vào `sources/` và kích hoạt `autoflow_notify`). |
+| `report_host_tools` | `pub fn report_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Cặp tool `[markdown_create, markdown_read]`. |
+| `youtube_host_tools` | `pub fn youtube_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Cặp tool `[yt_list_playlist, yt_fetch_transcript]`. |
+| `pdf_host_tools` | `pub fn pdf_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Cặp tool `[anydoc_inspect_pdf, anydoc_save_to_sources]`. |
+| `collector_host_tools` | `pub fn collector_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Gộp 4 tool thu thập nguồn (`anydoc_*` + `yt_*`). |
+| `daily_flow_host_tools` | `pub fn daily_flow_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>>` | Bộ tool chuẩn cho Flow `daily` (`wiki_readonly` + `add_to_sources` + `markdown_*` + 4 `reminder_*`). |
+| `wiki_flow_host_tools` | `pub fn wiki_flow_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Bộ tool chuẩn cho Flow `wiki` (`collector_host_tools` + 14 `wiki_*`). |
+| `all_host_tools` | `pub fn all_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>>` | Bộ tool chuẩn cho 1 `Orchestrator` hợp nhất (`collector` + `add_to_sources` + `markdown_*` + 4 `reminder_*` + 14 `wiki_*`). |
+| `all_host_tools_with_tasks` | `pub fn all_host_tools_with_tasks(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>>` | Bao gồm toàn bộ `all_host_tools` cộng thêm 6 tool `task_*`. |
 
 ---
 

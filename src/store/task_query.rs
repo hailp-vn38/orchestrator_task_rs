@@ -32,6 +32,21 @@ impl TaskStore {
         Ok(row.as_ref().map(map_task_row))
     }
 
+    pub(crate) async fn count_tasks_for_session(
+        &self,
+        flow_id: &str,
+        session_id: &str,
+    ) -> TaskResult<i64> {
+        let row =
+            sqlx::query("SELECT COUNT(*) as cnt FROM tasks WHERE flow_id = ?1 AND session_id = ?2")
+                .bind(flow_id)
+                .bind(session_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(db_err("count tasks for session"))?;
+        Ok(row.get("cnt"))
+    }
+
     pub(crate) async fn list_tasks(
         &self,
         scope: &TaskScope,

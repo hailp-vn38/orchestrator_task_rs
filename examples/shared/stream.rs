@@ -176,6 +176,21 @@ impl TaskStreamPrinter {
                     task.output_preview.as_deref().unwrap_or("-")
                 );
             }
+            TaskEvent::TaskDeleted {
+                task_id,
+                flow_id,
+                session_id,
+                ..
+            } => {
+                self.break_delta_line(&mut out);
+                let _ = writeln!(
+                    out,
+                    "\n[{elapsed_s:6.2}s] 🗑️  [TASK DELETED] id={} | flow={} | session={}",
+                    short_id(task_id),
+                    flow_id,
+                    short_id(session_id)
+                );
+            }
         }
     }
 }

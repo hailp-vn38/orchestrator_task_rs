@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::runtime::SharedTaskCore;
 use crate::tools::catalog::{
-    build_all_tool_specs, build_reminder_specs, TOOL_REMINDER_LIST, TOOL_TASK_DETAIL,
-    TOOL_TASK_LIST,
+    build_all_tool_specs, build_reminder_specs, build_voice_task_specs, TOOL_REMINDER_LIST,
+    TOOL_TASK_DETAIL, TOOL_TASK_LIST,
 };
 use crate::tools::voice_handler::execute_tool_raw;
 use crate::tools::TaskToolSpec;
@@ -61,6 +61,25 @@ impl HostTool for TaskHostTool {
             metadata: val,
         })
     }
+}
+
+pub(crate) fn build_task_host_tools(core: Arc<SharedTaskCore>) -> Vec<Arc<dyn HostTool>> {
+    let specs = build_voice_task_specs(&[]);
+    specs
+        .into_iter()
+        .map(|spec| {
+            let effect = if spec.name == TOOL_TASK_LIST || spec.name == TOOL_TASK_DETAIL {
+                ToolEffect::ReadOnly
+            } else {
+                ToolEffect::Mutating
+            };
+            Arc::new(TaskHostTool {
+                core: Arc::clone(&core),
+                fallback_spec: spec,
+                effect,
+            }) as Arc<dyn HostTool>
+        })
+        .collect()
 }
 
 pub(crate) fn build_reminder_host_tools(core: Arc<SharedTaskCore>) -> Vec<Arc<dyn HostTool>> {

@@ -3,15 +3,16 @@
 
 use std::sync::Arc;
 
+use llm_wiki::CollectionScope;
 use orchestrator_agent_rs::{ErrorCode as OrchErrorCode, PageRequest, RunStatus};
 
 use crate::error::{TaskError, TaskResult};
-use crate::runtime::{compute_next_cron_ms, parse_due_at_ms, watcher, SharedTaskCore};
+use crate::runtime::{compute_next_cron_ms, lock, parse_due_at_ms, watcher, SharedTaskCore};
 use crate::store::{new_id, now_ms, NewScheduleRow, NewTaskRow, TerminalUpdate};
 use crate::types::{
     CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView, ScheduleActionKind,
     ScheduleKind, ScheduleStatus, ScheduleView, TaskAgentMessageView, TaskDetailView, TaskEvent,
-    TaskScope, TaskSource, TaskStatus, TaskView,
+    TaskScope, TaskSource, TaskStatus, TaskView, WikiDeleteOutcome,
 };
 
 impl SharedTaskCore {
@@ -201,6 +202,121 @@ impl SharedTaskCore {
             }
         }
         Ok(task)
+    }
+
+    /// Xóa vĩnh viễn một Task:
+    /// 1. Hủy Task và các Followup đang chờ nếu Task chưa ở trạng thái kết thúc.
+    /// 2. Dừng Watcher đang theo dõi Task (nếu có).
+    /// 3. Xóa bản ghi Task trong `tasks.db` (tự động `ON DELETE CASCADE` với `task_followups`).
+    /// 4. Nếu không còn Task nào khác dùng chung `session_id`, gọi `Orchestrator::delete_session`
+    ///    để xóa luôn Root + Child sessions, messages, runs, invocations và artifacts trong `orchestrator.db`.
+    /// 5. Phát sự kiện `TaskEvent::TaskDeleted` cho UI View Task.
+    pub(crate) async fn delete_task_internal(
+        self: &Arc<Self>,
+        scope: &TaskScope,
+        task_id: &str,
+    ) -> TaskResult<()> {
+        self.ensure_open()?;
+        let task = self.cancel_task_internal(scope, task_id).await?;
+
+        if let Some(handle) = lock(&self.active_watchers).remove(&task.id) {
+            handle.abort();
+        }
+
+        self.store.delete_task(scope, &task.id).await?;
+
+        let remaining = self
+            .store
+            .count_tasks_for_session(&task.flow_id, &task.session_id)
+            .await
+            .unwrap_or(1);
+        if remaining == 0 {
+            if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
+                let caller = scope.to_caller_context();
+                let _ = orch.delete_session(&caller, &task.session_id).await;
+            }
+        }
+
+        self.event_bus.emit(TaskEvent::TaskDeleted {
+            task_id: task.id,
+            flow_id: task.flow_id,
+            session_id: task.session_id,
+            owner_id: task.owner_id,
+            workspace_id: task.workspace_id,
+            timestamp_ms: now_ms(),
+        });
+        Ok(())
+    }
+
+    /// Xóa một trang trong `wiki/` (kèm dọn thư mục cha rỗng, xóa khỏi `.wiki/index.sqlite` và đồng bộ `wiki/index.md`).
+    pub(crate) fn delete_wiki_file_internal(
+        &self,
+        rel_path: &str,
+    ) -> TaskResult<WikiDeleteOutcome> {
+        self.ensure_open()?;
+        let trimmed = rel_path.trim();
+        if trimmed.is_empty() {
+            return Err(TaskError::invalid_input("wiki file path must not be empty"));
+        }
+        let engine = self.resolve_wiki_engine()?;
+        let deleted = engine
+            .delete_file(CollectionScope::Wiki, trimmed)
+            .map_err(|e| TaskError::invalid_input(format!("delete wiki file '{trimmed}': {e}")))?;
+        if deleted {
+            let _ = engine.rebuild_or_sync_index_md();
+        }
+        let normalized = normalize_collection_rel_path("wiki", trimmed);
+        Ok(WikiDeleteOutcome {
+            rel_path: normalized,
+            deleted,
+            mirrored_wiki_rel_path: None,
+            mirrored_wiki_deleted: false,
+        })
+    }
+
+    /// Xóa một tài liệu nguồn trong `sources/` (và tùy chọn xóa luôn trang tóm tắt đối ứng trong `wiki/sources/...`).
+    pub(crate) fn delete_source_file_internal(
+        &self,
+        rel_path: &str,
+        delete_wiki_mirror: bool,
+    ) -> TaskResult<WikiDeleteOutcome> {
+        self.ensure_open()?;
+        let trimmed = rel_path.trim();
+        if trimmed.is_empty() {
+            return Err(TaskError::invalid_input(
+                "source file path must not be empty",
+            ));
+        }
+        let engine = self.resolve_wiki_engine()?;
+        let deleted = engine
+            .delete_file(CollectionScope::Sources, trimmed)
+            .map_err(|e| {
+                TaskError::invalid_input(format!("delete source file '{trimmed}': {e}"))
+            })?;
+
+        let normalized = normalize_collection_rel_path("sources", trimmed);
+        let scoped = normalized.strip_prefix("sources/").unwrap_or(&normalized);
+
+        let (mirrored_wiki_rel_path, mirrored_wiki_deleted) = if delete_wiki_mirror {
+            let mirror_scoped = format!("sources/{scoped}");
+            let mirror_full = format!("wiki/{mirror_scoped}");
+            let m_del = engine
+                .delete_file(CollectionScope::Wiki, &mirror_scoped)
+                .unwrap_or(false);
+            if m_del {
+                let _ = engine.rebuild_or_sync_index_md();
+            }
+            (Some(mirror_full), m_del)
+        } else {
+            (None, false)
+        };
+
+        Ok(WikiDeleteOutcome {
+            rel_path: normalized,
+            deleted,
+            mirrored_wiki_rel_path,
+            mirrored_wiki_deleted,
+        })
     }
 
     /// Tạo Schedule hoặc Reminder mới trong `task_schedules` và đánh thức `Scheduler`.
@@ -468,6 +584,18 @@ impl SharedTaskCore {
             .map(TaskAgentMessageView::from_message_view)
             .collect())
     }
+}
+
+fn normalize_collection_rel_path(collection: &str, raw: &str) -> String {
+    let clean = raw.trim().trim_start_matches('/').replace('\\', "/");
+    let prefix = format!("{collection}/");
+    let scoped = clean.strip_prefix(&prefix).unwrap_or(&clean);
+    let with_ext = if scoped.ends_with(".md") {
+        scoped.to_string()
+    } else {
+        format!("{scoped}.md")
+    };
+    format!("{collection}/{with_ext}")
 }
 
 fn clip_preview(text: &str, max_chars: usize) -> String {

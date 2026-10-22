@@ -14,7 +14,27 @@ use crate::types::{AgentCatalogEntry, TaskScope};
 
 pub(crate) mod catalog;
 pub(crate) mod host_adapter;
+pub mod markdown_report;
+pub mod pdf;
+pub mod toolkit;
 pub(crate) mod voice_handler;
+pub mod wiki_bridge;
+pub mod youtube;
+
+pub use markdown_report::{report_host_tools, MarkdownCreateTool, MarkdownReadTool};
+pub use pdf::{
+    build_sample_technical_pdf, convert_document_with_anydoc, pdf_host_tools, AnydocInspectPdfTool,
+    AnydocSaveToSourcesTool, ConvertedPdfDoc, SharedPdfState,
+};
+pub use toolkit::WorkspaceToolKit;
+pub use wiki_bridge::{
+    add_to_sources_host_tool, wiki_host_tools, wiki_readonly_host_tools, AddToSourcesTool,
+    WikiEngineBridgeTool,
+};
+pub use youtube::{
+    fetch_playlist, fetch_transcript, youtube_host_tools, PlaylistVideoEntry, YoutubeCollectorEnv,
+    YtFetchTranscriptTool, YtListPlaylistTool,
+};
 
 /// Đặc tả một Tool (tương thích trực tiếp với OpenAI / Anthropic / Gemini / Voice Agent function calling).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,13 +95,19 @@ impl TaskToolSuite {
         voice_handler::execute_tool_raw(&self.core, scope, tool_name, args).await
     }
 
+    /// Xuất 6 `HostTool` nhóm `task_*` (`task_create`, `task_followup`, `task_list`,
+    /// `task_detail`, `task_cancel`, `task_delete`).
+    pub fn task_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
+        host_adapter::build_task_host_tools(Arc::clone(&self.core))
+    }
+
     /// Xuất 4 `HostTool` dành riêng cho `reminder_planner` (`reminder_create`, `reminder_list`,
     /// `reminder_complete`, `reminder_delete`) để đăng ký vào `daily_orch` ở Pha 1 (`prepare`).
     pub fn reminder_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         host_adapter::build_reminder_host_tools(Arc::clone(&self.core))
     }
 
-    /// Xuất toàn bộ 9 `HostTool` (`task_*` + `reminder_*`).
+    /// Xuất toàn bộ 10 `HostTool` (`task_*` + `reminder_*`).
     pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         host_adapter::build_all_host_tools(Arc::clone(&self.core))
     }

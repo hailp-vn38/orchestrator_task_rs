@@ -2,27 +2,23 @@
 //! trên cùng 1 thư mục `WorkspaceLayout` dùng chung.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use llm_wiki::prompts::WikiTemplateId;
-use llm_wiki::{is_read_only_wiki_tool, AdaptiveReadBudget, WikiEngine};
+use llm_wiki::{AdaptiveReadBudget, WikiEngine};
 use orchestrator_agent_rs::{
     AgentDefinition, AgentMode, LlmBackend, LlmConfig, LlmProviderConfig, Orchestrator,
-    OrchestratorConfig, ProviderAuth, SecretString, ToolEffect,
+    OrchestratorConfig, ProviderAuth, SecretString,
 };
 use orchestrator_task_rs::{
-    TaskConfig, TaskManager, TaskRuntimeConfig, WikiAutoFlowBinding, WorkspaceLayout,
+    SharedPdfState, TaskConfig, TaskManager, TaskRuntimeConfig, WikiAutoFlowBinding,
+    WorkspaceLayout, WorkspaceToolKit, YoutubeCollectorEnv,
 };
 use tokio::sync::Notify;
 
 use crate::shared::env::{load_llm_credentials, resolve_shared_layout, ExampleResult};
-use crate::shared::pdf::{AnydocInspectPdfTool, AnydocSaveToSourcesTool, SharedPdfState};
 use crate::shared::prompts::write_prompts_and_skills;
-use crate::shared::tools::{
-    AddToSourcesTool, MarkdownCreateTool, MarkdownReadTool, WikiEngineBridgeTool,
-    YoutubeCollectorEnv, YtFetchTranscriptTool, YtListPlaylistTool,
-};
 
 #[derive(Debug, Clone)]
 pub struct HomelabBootOptions {
@@ -118,20 +114,12 @@ impl HomelabExampleApp {
             .unwrap_or(16_384);
         let read_budget = AdaptiveReadBudget::for_context_limit(context_limit_tokens);
 
-        let pdf_state = Arc::new(SharedPdfState::new(
-            engine.clone(),
-            autoflow_notify.clone(),
-            work_dir.join("pdf"),
-        ));
-        let yt_env = Arc::new(YoutubeCollectorEnv {
-            engine: engine.clone(),
-            autoflow_notify: autoflow_notify.clone(),
-            work_dir: work_dir.join("yt"),
-            langs: opts.langs,
-            limit: opts.limit,
-            playlist_url: Mutex::new(String::new()),
-            videos: Mutex::new(Vec::new()),
-        });
+        let toolkit =
+            WorkspaceToolKit::from_layout(&layout, engine.clone(), autoflow_notify.clone())
+                .with_read_budget(read_budget)
+                .with_youtube_options(opts.langs, opts.limit);
+        let pdf_state = toolkit.pdf_state.clone();
+        let yt_env = toolkit.yt_env.clone();
 
         // 2. PHA 1: Prepare `TaskManager` từ `WorkspaceLayout`
         let runtime_cfg = TaskRuntimeConfig {
@@ -307,45 +295,9 @@ impl HomelabExampleApp {
         orch_cfg.runtime.tool_output_cap_bytes =
             (read_budget.max_window_chars * 3 / 2).max(24 * 1024);
 
-        let mut builder = Orchestrator::builder(orch_cfg)
-            .register_tool(Arc::new(AnydocInspectPdfTool {
-                state: pdf_state.clone(),
-            }))
-            .register_tool(Arc::new(AnydocSaveToSourcesTool {
-                state: pdf_state.clone(),
-            }))
-            .register_tool(Arc::new(YtListPlaylistTool {
-                env: yt_env.clone(),
-            }))
-            .register_tool(Arc::new(YtFetchTranscriptTool {
-                env: yt_env.clone(),
-            }))
-            .register_tool(Arc::new(AddToSourcesTool {
-                engine: engine.clone(),
-                autoflow_notify: autoflow_notify.clone(),
-            }))
-            .register_tool(Arc::new(MarkdownCreateTool {
-                reports_dir: layout.reports_dir(),
-            }))
-            .register_tool(Arc::new(MarkdownReadTool {
-                reports_dir: layout.reports_dir(),
-            }));
-
-        for tool in task_init.reminder_host_tools() {
+        let mut builder = Orchestrator::builder(orch_cfg);
+        for tool in toolkit.all_host_tools(&task_init) {
             builder = builder.register_tool(tool);
-        }
-        for spec in engine.llm_tool_definitions() {
-            let effect = if is_read_only_wiki_tool(&spec.name) {
-                ToolEffect::ReadOnly
-            } else {
-                ToolEffect::Mutating
-            };
-            builder = builder.register_tool(Arc::new(WikiEngineBridgeTool {
-                engine: engine.clone(),
-                spec,
-                effect,
-                read_budget,
-            }));
         }
         let orchestrator = Arc::new(builder.build().await?);
 

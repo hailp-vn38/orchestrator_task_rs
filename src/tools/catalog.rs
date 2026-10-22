@@ -11,6 +11,7 @@ pub(crate) const TOOL_TASK_FOLLOWUP: &str = "task_followup";
 pub(crate) const TOOL_TASK_LIST: &str = "task_list";
 pub(crate) const TOOL_TASK_DETAIL: &str = "task_detail";
 pub(crate) const TOOL_TASK_CANCEL: &str = "task_cancel";
+pub(crate) const TOOL_TASK_DELETE: &str = "task_delete";
 
 pub(crate) const TOOL_REMINDER_CREATE: &str = "reminder_create";
 pub(crate) const TOOL_REMINDER_LIST: &str = "reminder_list";
@@ -123,6 +124,21 @@ pub(crate) fn build_voice_task_specs(agents: &[AgentCatalogEntry]) -> Vec<TaskTo
                     "task_id": {
                         "type": "string",
                         "description": "ID of the Task to cancel."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        TaskToolSpec {
+            name: TOOL_TASK_DELETE.to_string(),
+            description: "Permanently delete a background Task record, its follow-ups, and its underlying agent session.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the Task to delete."
                     }
                 },
                 "additionalProperties": false

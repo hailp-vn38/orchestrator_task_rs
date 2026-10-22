@@ -38,6 +38,14 @@ pub enum TaskEvent {
     TaskTerminal {
         task: TaskView,
     },
+    TaskDeleted {
+        task_id: String,
+        flow_id: String,
+        session_id: String,
+        owner_id: String,
+        workspace_id: String,
+        timestamp_ms: i64,
+    },
     FollowupQueued {
         task_id: String,
         followup_id: String,
@@ -65,6 +73,11 @@ impl TaskEvent {
                 ..
             }
             | Self::TaskExecutionStream {
+                owner_id,
+                workspace_id,
+                ..
+            }
+            | Self::TaskDeleted {
                 owner_id,
                 workspace_id,
                 ..

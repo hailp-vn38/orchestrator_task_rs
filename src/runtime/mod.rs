@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use cron::Schedule as CronSchedule;
+use llm_wiki::WikiEngine;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,8 @@ pub(crate) struct SharedTaskCore {
     pub(crate) shutdown: CancellationToken,
     /// Được gán một lần duy nhất khi gọi `TaskManagerInit::start()`.
     pub(crate) flows: OnceLock<FlowRegistry>,
+    /// `WikiEngine` dùng chung cho Auto-Flow và các thao tác quản lý tài liệu Wiki/Source.
+    pub(crate) wiki_engine: OnceLock<Arc<WikiEngine>>,
     /// Các watcher đang theo dõi các Task `running` (key = `task_id`).
     pub(crate) active_watchers: Mutex<HashMap<String, JoinHandle<()>>>,
 }
@@ -56,6 +59,7 @@ impl SharedTaskCore {
             autoflow_done_wake: Arc::new(Notify::new()),
             shutdown,
             flows: OnceLock::new(),
+            wiki_engine: OnceLock::new(),
             active_watchers: Mutex::new(HashMap::new()),
         }
     }
@@ -77,6 +81,23 @@ impl SharedTaskCore {
                 "TaskManager has not been started yet (call TaskManagerInit::start first)",
             )
         })
+    }
+
+    pub(crate) fn resolve_wiki_engine(&self) -> TaskResult<Arc<WikiEngine>> {
+        if let Some(eng) = self.wiki_engine.get() {
+            return Ok(Arc::clone(eng));
+        }
+        if let Some(ref vault_dir) = self.config.wiki_vault_dir {
+            let opened = Arc::new(
+                WikiEngine::open(vault_dir)
+                    .map_err(|e| TaskError::storage("open WikiEngine", e))?,
+            );
+            let _ = self.wiki_engine.set(Arc::clone(&opened));
+            return Ok(opened);
+        }
+        Err(TaskError::config(
+            "WikiEngine is not configured (set wiki_vault_dir in TaskConfig or call with_wiki_engine / with_wiki_autoflow)",
+        ))
     }
 }
 

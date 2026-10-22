@@ -8,7 +8,8 @@ use crate::error::{TaskError, TaskResult};
 use crate::runtime::{parse_due_at_ms, SharedTaskCore};
 use crate::tools::catalog::{
     TOOL_REMINDER_COMPLETE, TOOL_REMINDER_CREATE, TOOL_REMINDER_DELETE, TOOL_REMINDER_LIST,
-    TOOL_TASK_CANCEL, TOOL_TASK_CREATE, TOOL_TASK_DETAIL, TOOL_TASK_FOLLOWUP, TOOL_TASK_LIST,
+    TOOL_TASK_CANCEL, TOOL_TASK_CREATE, TOOL_TASK_DELETE, TOOL_TASK_DETAIL, TOOL_TASK_FOLLOWUP,
+    TOOL_TASK_LIST,
 };
 use crate::types::{
     CreateScheduleRequest, CreateTaskRequest, Priority, ScheduleActionKind, ScheduleFilter,
@@ -27,6 +28,7 @@ pub(crate) async fn execute_tool_raw(
         TOOL_TASK_LIST => handle_task_list(core, scope, &args).await,
         TOOL_TASK_DETAIL => handle_task_detail(core, scope, &args).await,
         TOOL_TASK_CANCEL => handle_task_cancel(core, scope, &args).await,
+        TOOL_TASK_DELETE => handle_task_delete(core, scope, &args).await,
         TOOL_REMINDER_CREATE => handle_reminder_create(core, scope, &args).await,
         TOOL_REMINDER_LIST => handle_reminder_list(core, scope, &args).await,
         TOOL_REMINDER_COMPLETE => handle_reminder_complete(core, scope, &args).await,
@@ -186,6 +188,19 @@ async fn handle_task_cancel(
         "task_id": task.id,
         "status": task.status.as_str(),
         "cancelled": true,
+    }))
+}
+
+async fn handle_task_delete(
+    core: &Arc<SharedTaskCore>,
+    scope: &TaskScope,
+    args: &Value,
+) -> TaskResult<Value> {
+    let task_id = req_str(args, "task_id")?;
+    core.delete_task_internal(scope, task_id).await?;
+    Ok(json!({
+        "task_id": task_id,
+        "deleted": true,
     }))
 }
 

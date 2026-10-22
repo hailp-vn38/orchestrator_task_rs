@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use llm_wiki::WikiEngine;
+
 use crate::error::TaskResult;
 use crate::manager::TaskManager;
 use crate::tools::TaskToolSuite;
@@ -20,6 +22,11 @@ impl TaskManager {
     /// Đường dẫn thư mục gốc của Wiki Vault (`data_root`), nếu đã cấu hình trong `TaskConfig`.
     pub fn wiki_vault_dir(&self) -> Option<&Path> {
         self.core.config.wiki_vault_dir.as_deref()
+    }
+
+    /// Trả về tham chiếu tới `Arc<WikiEngine>` đã gắn với `TaskManager` (nếu có).
+    pub fn wiki_engine(&self) -> Option<&Arc<WikiEngine>> {
+        self.core.wiki_engine.get()
     }
 
     /// Lấy `TaskToolSuite` (hỗ trợ cả Raw JSON Handler cho Voice Agent và `HostTool`).

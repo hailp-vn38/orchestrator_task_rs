@@ -1,8 +1,11 @@
-//! Các thao tác điều khiển Task (`create_task`, `send_followup`, `cancel_task`, `delete_task`).
+//! Các thao tác điều khiển Task (`create_task`, `send_followup`, `cancel_task`, `delete_task`)
+//! và xóa tài liệu Wiki/Source (`delete_wiki_file`, `delete_source_file`).
 
 use crate::error::TaskResult;
 use crate::manager::TaskManager;
-use crate::types::{CreateTaskRequest, FollowupView, TaskScope, TaskSource, TaskView};
+use crate::types::{
+    CreateTaskRequest, FollowupView, TaskScope, TaskSource, TaskView, WikiDeleteOutcome,
+};
 
 impl TaskManager {
     /// Tạo và chạy ngay một Task với `default_scope` (`"personal"`, `"homelab"`).
@@ -61,16 +64,34 @@ impl TaskManager {
         self.core.cancel_task_internal(scope, task_id).await
     }
 
-    /// Xóa một bản ghi Task trong `default_scope` (nếu đang chạy sẽ tự động cancel trước).
+    /// Xóa vĩnh viễn một Task trong `default_scope`:
+    /// tự động cancel nếu đang chạy, xóa bản ghi trong `tasks.db` + `task_followups`,
+    /// xóa Root/Subagent session tương ứng trong `Orchestrator` và phát `TaskEvent::TaskDeleted`.
     pub async fn delete_task(&self, task_id: &str) -> TaskResult<()> {
         let scope = &self.core.config.default_scope;
         self.delete_task_scoped(scope, task_id).await
     }
 
-    /// Xóa một bản ghi Task trong `TaskScope` chỉ định.
+    /// Xóa vĩnh viễn một Task trong `TaskScope` chỉ định.
     pub async fn delete_task_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<()> {
-        self.core.ensure_open()?;
-        let _ = self.core.cancel_task_internal(scope, task_id).await?;
-        self.core.store.delete_task(scope, task_id).await
+        self.core.delete_task_internal(scope, task_id).await
+    }
+
+    /// Xóa một trang trong `wiki/` (VD: `"entities/rust/tokio.md"` hoặc `"wiki/entities/rust/tokio.md"`),
+    /// tự động dọn thư mục cha rỗng, xóa khỏi `.wiki/index.sqlite` và đồng bộ lại `wiki/index.md`.
+    pub fn delete_wiki_file(&self, rel_path: &str) -> TaskResult<WikiDeleteOutcome> {
+        self.core.delete_wiki_file_internal(rel_path)
+    }
+
+    /// Xóa một file nguồn trong `sources/` (VD: `"docs/flow/lib.md"` hoặc `"sources/docs/flow/lib.md"`).
+    /// Nếu `delete_wiki_mirror = true`, tự động xóa luôn trang tóm tắt đối ứng tại `wiki/sources/<rel_path>`
+    /// và đồng bộ lại `wiki/index.md`.
+    pub fn delete_source_file(
+        &self,
+        rel_path: &str,
+        delete_wiki_mirror: bool,
+    ) -> TaskResult<WikiDeleteOutcome> {
+        self.core
+            .delete_source_file_internal(rel_path, delete_wiki_mirror)
     }
 }

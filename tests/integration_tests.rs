@@ -12,9 +12,10 @@ use orchestrator_agent_rs::{
     OrchestratorConfig, ProviderAuth, SecretString,
 };
 use orchestrator_task_rs::{
-    CreateScheduleRequest, CreateTaskRequest, Priority, ScheduleActionKind, ScheduleFilter,
-    TaskConfig, TaskEvent, TaskFeedItem, TaskFilter, TaskManager, TaskRuntimeConfig, TaskScope,
-    TaskSource, TaskStatus, WikiAutoFlowBinding, WorkspaceLayout,
+    build_sample_technical_pdf, CreateScheduleRequest, CreateTaskRequest, Priority,
+    ScheduleActionKind, ScheduleFilter, TaskConfig, TaskEvent, TaskFeedItem, TaskFilter,
+    TaskManager, TaskRuntimeConfig, TaskScope, TaskSource, TaskStatus, WikiAutoFlowBinding,
+    WorkspaceLayout, WorkspaceToolKit,
 };
 use serde_json::json;
 use tokio::sync::Notify;
@@ -199,6 +200,33 @@ async fn two_phase_init_voice_catalog_and_task_lifecycle() {
     let page = task_mgr.list_tasks(&TaskFilter::default()).await.unwrap();
     assert_eq!(page.total, 1);
 
+    // Xóa Task qua tool `task_delete` -> kiểm tra bản ghi trong `tasks.db`, session trong `Orchestrator` và `TaskEvent::TaskDeleted`
+    let del_resp = suite
+        .execute_raw("task_delete", json!({ "task_id": task_id }))
+        .await
+        .unwrap();
+    assert_eq!(del_resp["deleted"], true);
+    assert!(task_mgr.get_task(&task_id).await.is_err());
+    let caller = TaskScope::default().to_caller_context();
+    assert!(daily_orch
+        .get_session(&caller, &final_view.session_id)
+        .await
+        .is_err());
+
+    let mut saw_deleted_event = false;
+    for _ in 0..10 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskDeleted {
+            task_id: del_id, ..
+        }))) = tokio::time::timeout(Duration::from_millis(500), sub.recv()).await
+        {
+            if del_id == task_id {
+                saw_deleted_event = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_deleted_event, "TaskDeleted event should be emitted");
+
     task_mgr.shutdown().await.unwrap();
     daily_orch.shutdown().await.unwrap();
     wiki_orch.shutdown().await.unwrap();
@@ -345,6 +373,32 @@ async fn schedule_reminder_and_managed_autoflow() {
     assert!(af_task.prompt.contains(&written.info.scoped_path));
 
     let _ = CreateTaskRequest::new("noop", "noop").with_source(TaskSource::Api);
+
+    // 3. Kiểm tra API xóa Wiki & Source trên `TaskManager` và `WikiEngine`
+    assert!(task_mgr.wiki_engine().is_some());
+    engine
+        .write_wiki_file(
+            "entities/software-architecture/task-manager.md",
+            "---\ntitle: TaskManager\ntype: entity\n---\n# TaskManager\n",
+        )
+        .unwrap();
+    engine
+        .write_wiki_file(
+            &format!("sources/{}", written.info.scoped_path),
+            "---\ntitle: Mirror Summary\ntype: source\n---\n# Mirror\n",
+        )
+        .unwrap();
+
+    let wiki_del = task_mgr
+        .delete_wiki_file("entities/software-architecture/task-manager.md")
+        .unwrap();
+    assert!(wiki_del.deleted);
+
+    let src_del = task_mgr
+        .delete_source_file(&written.info.scoped_path, true)
+        .unwrap();
+    assert!(src_del.deleted);
+    assert!(src_del.mirrored_wiki_deleted);
 
     task_mgr.shutdown().await.unwrap();
     wiki_orch.shutdown().await.unwrap();
@@ -551,4 +605,169 @@ async fn thinking_blocks_are_stripped_and_empty_thinking_fails_task() {
 
     task_mgr.shutdown().await.unwrap();
     daily_orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = WorkspaceLayout::new(dir.path().join("workspace"));
+    layout.ensure_dirs().unwrap();
+
+    let prompt_path = layout.prompts_dir().join("agent.md");
+    std::fs::write(&prompt_path, "You are a unified test agent.").unwrap();
+
+    let engine = Arc::new(WikiEngine::open(layout.wiki_vault_dir()).unwrap());
+    engine.apply_template(WikiTemplateId::Research).unwrap();
+    let autoflow_notify = Arc::new(Notify::new());
+
+    let task_init =
+        TaskManager::prepare(TaskConfig::from_layout(&layout).with_default_agent("unified_agent"))
+            .await
+            .unwrap();
+
+    assert_eq!(task_init.task_host_tools().len(), 6);
+    assert_eq!(task_init.reminder_host_tools().len(), 4);
+    assert_eq!(task_init.all_host_tools().len(), 10);
+
+    let toolkit = WorkspaceToolKit::from_layout(&layout, engine.clone(), autoflow_notify.clone())
+        .with_context_limit_tokens(128_000)
+        .with_youtube_options("en,vi", 10);
+
+    // Kiểm tra các nhóm tool xuất ra từ WorkspaceToolKit
+    assert_eq!(toolkit.pdf_host_tools().len(), 2);
+    assert_eq!(toolkit.youtube_host_tools().len(), 2);
+    assert_eq!(toolkit.collector_host_tools().len(), 4);
+    assert_eq!(toolkit.report_host_tools().len(), 2);
+    assert!(!toolkit.wiki_readonly_host_tools().is_empty());
+    assert!(toolkit.wiki_host_tools().len() > toolkit.wiki_readonly_host_tools().len());
+
+    // Tạo sample PDF và nạp vào `toolkit.pdf_state`
+    let pdf_path = dir.path().join("sample.pdf");
+    std::fs::write(&pdf_path, build_sample_technical_pdf()).unwrap();
+    toolkit.pdf_state.set_input_paths(vec![pdf_path]);
+
+    // Kịch bản Agent gọi các HostTool tái sử dụng:
+    // Bước 1: markdown_create + anydoc_inspect_pdf
+    // Bước 2: markdown_read + anydoc_save_to_sources + add_to_sources
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "Creating markdown report and inspecting PDF",
+        vec![
+            (
+                "c1",
+                "markdown_create",
+                json!({
+                    "filename": "architecture-summary.md",
+                    "title": "Architecture Summary",
+                    "markdown_body": "Detailed standalone report content."
+                }),
+            ),
+            ("c2", "anydoc_inspect_pdf", json!({ "doc_index": 1 })),
+        ],
+    );
+    gw.push_tool_calls(
+        "Reading report and saving sources",
+        vec![
+            (
+                "c3",
+                "markdown_read",
+                json!({
+                    "filename": "architecture-summary.md"
+                }),
+            ),
+            (
+                "c4",
+                "anydoc_save_to_sources",
+                json!({
+                    "doc_index": 1,
+                    "topic_folder": "ai-engineering/hybrid-search",
+                    "title": "Hybrid Search Technical PDF",
+                    "tags": ["topic/ai-engineering/hybrid-search", "pdf"]
+                }),
+            ),
+            (
+                "c5",
+                "add_to_sources",
+                json!({
+                    "topic_folder": "software-architecture/reusable-tools",
+                    "file_stem": "workspace-toolkit",
+                    "title": "WorkspaceToolKit Design",
+                    "markdown_body": "## Overview\nHost applications reuse built-in HostTools directly.",
+                    "tags": ["topic/software-architecture/reusable-tools", "rust"]
+                }),
+            ),
+        ],
+    );
+    gw.push_text("Đã hoàn tất kiểm tra toàn bộ bộ công cụ tái sử dụng.");
+
+    let agent = AgentDefinition::new("unified_agent", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Unified agent testing WorkspaceToolKit")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools([
+            "markdown_create",
+            "markdown_read",
+            "anydoc_inspect_pdf",
+            "anydoc_save_to_sources",
+            "add_to_sources",
+            "wiki_tree",
+        ])
+        .with_steps(10);
+
+    let mut builder = Orchestrator::builder(OrchestratorConfig::new(
+        test_llm_config(),
+        vec![agent],
+        layout.orchestrator_store_dir(),
+    ))
+    .with_gateway(gw);
+
+    for tool in toolkit.all_host_tools(&task_init) {
+        builder = builder.register_tool(tool);
+    }
+    let orch = Arc::new(builder.build().await.unwrap());
+
+    let task_mgr = task_init
+        .with_orchestrator(orch.clone())
+        .start()
+        .await
+        .unwrap();
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    let task = task_mgr
+        .create_task(CreateTaskRequest::new(
+            "Test WorkspaceToolKit",
+            "Run markdown, pdf, and add_to_sources tools.",
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_terminal = false;
+    for _ in 0..200 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(5), sub.recv()).await
+        {
+            if t.id == task.id {
+                assert_eq!(t.status, TaskStatus::Completed);
+                saw_terminal = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_terminal, "Task should reach terminal state");
+
+    assert!(layout
+        .reports_dir()
+        .join("architecture-summary.md")
+        .exists());
+    assert_eq!(toolkit.pdf_state.recorded_docs().len(), 1);
+    assert!(toolkit.pdf_state.recorded_docs()[0]
+        .saved_source_scoped_path
+        .is_some());
+
+    let detail = task_mgr.get_task_detail(&task.id).await.unwrap();
+    let root = detail.root_agent.expect("root session");
+    assert_eq!(root.invocations.len(), 5);
+
+    task_mgr.shutdown().await.unwrap();
+    orch.shutdown().await.unwrap();
 }

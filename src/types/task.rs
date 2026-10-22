@@ -284,3 +284,16 @@ pub struct AgentCatalogEntry {
     pub target: TargetAgent,
     pub description: String,
 }
+
+/// Kết quả xóa tài liệu trong Wiki Vault (`wiki/` hoặc `sources/`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiDeleteOutcome {
+    /// Đường dẫn tương đối đã chuẩn hóa của file được yêu cầu xóa.
+    pub rel_path: String,
+    /// `true` nếu file trên đĩa hoặc bản ghi trong `.wiki/index.sqlite` đã được xóa.
+    pub deleted: bool,
+    /// Đường dẫn trang tóm tắt đối ứng trong `wiki/sources/...` (khi xóa file trong `sources/` kèm `delete_wiki_mirror = true`).
+    pub mirrored_wiki_rel_path: Option<String>,
+    /// `true` nếu trang tóm tắt đối ứng trong `wiki/sources/...` cũng đã được xóa.
+    pub mirrored_wiki_deleted: bool,
+}

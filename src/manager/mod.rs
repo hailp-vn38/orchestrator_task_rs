@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use llm_wiki::WikiEngine;
 use orchestrator_agent_rs::Orchestrator;
 use tokio::task::JoinHandle;
 
@@ -23,6 +24,7 @@ pub struct TaskManagerInit {
     pub(super) core: Arc<SharedTaskCore>,
     pub(super) owner_lock: Option<OwnerLock>,
     pub(super) flows: BTreeMap<String, Arc<Orchestrator>>,
+    pub(super) wiki_engine: Option<Arc<WikiEngine>>,
     pub(super) autoflow: Option<WikiAutoFlowBinding>,
 }
 

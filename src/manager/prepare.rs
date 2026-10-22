@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use llm_wiki::WikiEngine;
 use orchestrator_agent_rs::{HostTool, Orchestrator};
 use tokio_util::sync::CancellationToken;
 
@@ -14,7 +15,9 @@ use crate::runtime::{
     autoflow, scheduler, watcher, FlowRegistry, SharedTaskCore, WikiAutoFlowBinding,
 };
 use crate::store::{TaskStore, TerminalUpdate, DB_FILE, OWNER_LOCK_FILE};
-use crate::tools::host_adapter::{build_all_host_tools, build_reminder_host_tools};
+use crate::tools::host_adapter::{
+    build_all_host_tools, build_reminder_host_tools, build_task_host_tools,
+};
 use crate::types::TaskStatus;
 
 impl TaskManager {
@@ -37,19 +40,26 @@ impl TaskManager {
             core,
             owner_lock: Some(owner_lock),
             flows: BTreeMap::new(),
+            wiki_engine: None,
             autoflow: None,
         })
     }
 }
 
 impl TaskManagerInit {
+    /// Xuất 6 `HostTool` nhóm `task_*` (`task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `task_delete`)
+    /// trước khi gọi `OrchestratorBuilder::build()`.
+    pub fn task_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
+        build_task_host_tools(Arc::clone(&self.core))
+    }
+
     /// Xuất 4 `HostTool` (`reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`)
     /// để đăng ký vào `daily_orch` (Flow 2) trước khi gọi `OrchestratorBuilder::build()`.
     pub fn reminder_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         build_reminder_host_tools(Arc::clone(&self.core))
     }
 
-    /// Xuất toàn bộ 9 `HostTool` (`task_*` + `reminder_*`).
+    /// Xuất toàn bộ 10 `HostTool` (`task_*` + `reminder_*`).
     pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         build_all_host_tools(Arc::clone(&self.core))
     }
@@ -69,8 +79,16 @@ impl TaskManagerInit {
         self
     }
 
+    /// Gắn trực tiếp `Arc<WikiEngine>` vào `TaskManager` để phục vụ các thao tác quản lý/xóa
+    /// tài liệu Wiki & Source (nếu đã gọi [`Self::with_wiki_autoflow`], `engine` được tự động gắn).
+    pub fn with_wiki_engine(mut self, engine: Arc<WikiEngine>) -> Self {
+        self.wiki_engine = Some(engine);
+        self
+    }
+
     /// Gắn cầu nối `WikiAutoFlowBinding` để tự động chuyển `autoflow_notify` thành các Task trên Flow `wiki`.
     pub fn with_wiki_autoflow(mut self, binding: WikiAutoFlowBinding) -> Self {
+        self.wiki_engine = Some(Arc::clone(&binding.engine));
         self.autoflow = Some(binding);
         self
     }
@@ -86,6 +104,9 @@ impl TaskManagerInit {
         }
 
         let _ = self.core.flows.set(registry);
+        if let Some(eng) = self.wiki_engine.take() {
+            let _ = self.core.wiki_engine.set(eng);
+        }
 
         // Reconcile các Task đang ở trạng thái 'queued' hoặc 'running' từ lần chạy trước
         reconcile_active_tasks(&self.core).await?;
