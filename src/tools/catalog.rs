@@ -9,6 +9,7 @@ use crate::types::AgentCatalogEntry;
 pub(crate) const TOOL_TASK_CREATE: &str = "task_create";
 pub(crate) const TOOL_TASK_FOLLOWUP: &str = "task_followup";
 pub(crate) const TOOL_TASK_LIST: &str = "task_list";
+pub(crate) const TOOL_TASK_DETAIL: &str = "task_detail";
 pub(crate) const TOOL_TASK_CANCEL: &str = "task_cancel";
 
 pub(crate) const TOOL_REMINDER_CREATE: &str = "reminder_create";
@@ -88,6 +89,25 @@ pub(crate) fn build_voice_task_specs(agents: &[AgentCatalogEntry]) -> Vec<TaskTo
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of tasks to return (1..=50, default 10)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        TaskToolSpec {
+            name: TOOL_TASK_DETAIL.to_string(),
+            description: "Get detailed execution state of a background Task, including Root Agent and Subagent sessions, step/token usage summary, tool invocations, and follow-up queue.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the Task to inspect."
+                    },
+                    "include_messages": {
+                        "type": "boolean",
+                        "description": "Whether to include recent conversation messages of Root and Subagent sessions (default false)."
                     }
                 },
                 "additionalProperties": false

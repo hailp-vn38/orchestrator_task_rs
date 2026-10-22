@@ -44,8 +44,8 @@ impl TaskToolSuite {
             .unwrap_or_default()
     }
 
-    /// Trả về toàn bộ Tool Specs (8 tools: `task_create`, `task_followup`, `task_list`, `task_cancel`,
-    /// `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`), trong đó
+    /// Trả về toàn bộ Tool Specs (9 tools: `task_create`, `task_followup`, `task_list`, `task_detail`,
+    /// `task_cancel`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`), trong đó
     /// `task_create` và `reminder_create` đã tự động nhúng danh sách `target_agent` và mô tả
     /// từ các `Orchestrator` để Voice Agent tự lựa chọn.
     pub fn tool_specs(&self) -> Vec<TaskToolSpec> {
@@ -53,7 +53,7 @@ impl TaskToolSuite {
         catalog::build_all_tool_specs(&agents)
     }
 
-    /// Chỉ lấy 4 tool `task_*` (`task_create`, `task_followup`, `task_list`, `task_cancel`) cho Voice Agent.
+    /// Chỉ lấy 5 tool `task_*` (`task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`) cho Voice Agent.
     pub fn voice_task_tool_specs(&self) -> Vec<TaskToolSpec> {
         let agents = self.available_agents();
         catalog::build_voice_task_specs(&agents)
@@ -81,7 +81,7 @@ impl TaskToolSuite {
         host_adapter::build_reminder_host_tools(Arc::clone(&self.core))
     }
 
-    /// Xuất toàn bộ 8 `HostTool` (`task_*` + `reminder_*`).
+    /// Xuất toàn bộ 9 `HostTool` (`task_*` + `reminder_*`).
     pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         host_adapter::build_all_host_tools(Arc::clone(&self.core))
     }

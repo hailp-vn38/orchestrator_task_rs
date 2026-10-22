@@ -4,6 +4,7 @@ use orchestrator_agent_rs::{FamilySnapshot, RunStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::config::TargetAgent;
+use crate::types::execution::{TaskAgentSessionView, TaskExecutionSummary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -198,12 +199,67 @@ pub struct FollowupView {
     pub submitted_at: Option<i64>,
 }
 
-/// Chi tiết đầy đủ của 1 Task trên UI View Task (gồm bản ghi Task, danh sách Followup, và FamilySnapshot).
-#[derive(Debug, Clone)]
+/// Chi tiết đầy đủ của 1 Task trên UI View Task (gồm bản ghi Task, danh sách Followup,
+/// tổng hợp số liệu `execution_summary`, chi tiết phiên của `root_agent` + `subagents`,
+/// và `FamilySnapshot` gốc từ `Orchestrator`).
+#[derive(Debug, Clone, Serialize)]
 pub struct TaskDetailView {
     pub task: TaskView,
     pub followups: Vec<FollowupView>,
+    pub execution_summary: Option<TaskExecutionSummary>,
+    pub root_agent: Option<TaskAgentSessionView>,
+    pub subagents: Vec<TaskAgentSessionView>,
+    #[serde(skip)]
     pub family_snapshot: Option<FamilySnapshot>,
+}
+
+impl TaskDetailView {
+    pub fn from_parts(
+        task: TaskView,
+        followups: Vec<FollowupView>,
+        family_snapshot: Option<FamilySnapshot>,
+    ) -> Self {
+        let (execution_summary, root_agent, subagents) = match family_snapshot {
+            Some(ref snap) => {
+                let summary = TaskExecutionSummary::from_family_snapshot(snap);
+                let root = TaskAgentSessionView::from_session_snapshot(&snap.root);
+                let children = snap
+                    .children
+                    .iter()
+                    .map(TaskAgentSessionView::from_session_snapshot)
+                    .collect();
+                (Some(summary), Some(root), children)
+            }
+            None => (None, None, Vec::new()),
+        };
+
+        Self {
+            task,
+            followups,
+            execution_summary,
+            root_agent,
+            subagents,
+            family_snapshot,
+        }
+    }
+
+    /// Trả về danh sách mọi phiên Agent trong Task (Root Agent đứng đầu, tiếp theo là các Subagent).
+    pub fn all_agents(&self) -> Vec<&TaskAgentSessionView> {
+        let mut out = Vec::with_capacity(1 + self.subagents.len());
+        if let Some(ref root) = self.root_agent {
+            out.push(root);
+        }
+        out.extend(self.subagents.iter());
+        out
+    }
+
+    /// Tìm phiên thực thi của một Agent theo `session_id` hoặc `agent_id`.
+    pub fn find_agent_session(&self, session_or_agent_id: &str) -> Option<&TaskAgentSessionView> {
+        let key = session_or_agent_id.trim();
+        self.all_agents()
+            .into_iter()
+            .find(|s| s.session_id == key || s.agent_id == key)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

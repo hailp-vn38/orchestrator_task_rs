@@ -82,7 +82,7 @@ Flow phải chứa agent có thể làm root (`Primary` hoặc `All`); `daily_ro
 
 Scope mặc định là `owner_id = "personal"`, `workspace_id = "homelab"`; host có thể dùng các API `*_scoped` để chỉ định scope. Mỗi store chỉ được một `TaskManager` sở hữu tại một thời điểm. Dùng thư mục store riêng với store của Orchestrator và Wiki.
 
-Bộ tools gồm `task_create`, `task_followup`, `task_list`, `task_cancel`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`. `voice_tool_suite().tool_specs()` trả schema; `execute_raw()` hoặc `execute_raw_scoped()` thực thi lời gọi JSON.
+Bộ tools gồm `task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`. `voice_tool_suite().tool_specs()` trả schema; `execute_raw()` hoặc `execute_raw_scoped()` thực thi lời gọi JSON.
 
 ## Kiểm tra cục bộ
 
@@ -118,10 +118,11 @@ Nếu repository dependency là private, cấu hình Actions secret `DEPENDENCIE
 | `src/types/` | Các kiểu dữ liệu miền |
 | `migrations/` | Schema SQLite, nhúng khi biên dịch |
 
+- [Tài liệu API đầy đủ (`docs/API.md`)](docs/API.md)
 - [Từ điển miền](GLOSSARY.md)
 - [Đặc tả Task và Dual-Flow hợp nhất](docs/Unified%20Task%20And%20Dualflow%20Spec.md)
 - [Đặc tả kiến trúc Dual-Flow](docs/Dual%20Flow%20Architecture%20Spec.md)
 - [Các quyết định kiến trúc](docs/adr/)
 - [Quy ước issue và spec cục bộ](docs/agents/issue-tracker.md)
 
-Các đặc tả mô tả thiết kế; đối chiếu public API trong `src/lib.rs` khi tích hợp.
+Các đặc tả mô tả thiết kế; xem [docs/API.md](docs/API.md) và `src/lib.rs` để tra cứu đầy đủ chữ ký hàm, kiểu dữ liệu, JSON Schema của bộ 8 tools và mã lỗi khi tích hợp.

@@ -10,7 +10,8 @@ use serde_json::Value;
 
 use crate::runtime::SharedTaskCore;
 use crate::tools::catalog::{
-    build_all_tool_specs, build_reminder_specs, TOOL_REMINDER_LIST, TOOL_TASK_LIST,
+    build_all_tool_specs, build_reminder_specs, TOOL_REMINDER_LIST, TOOL_TASK_DETAIL,
+    TOOL_TASK_LIST,
 };
 use crate::tools::voice_handler::execute_tool_raw;
 use crate::tools::TaskToolSpec;
@@ -86,7 +87,10 @@ pub(crate) fn build_all_host_tools(core: Arc<SharedTaskCore>) -> Vec<Arc<dyn Hos
     specs
         .into_iter()
         .map(|spec| {
-            let effect = if spec.name == TOOL_REMINDER_LIST || spec.name == TOOL_TASK_LIST {
+            let effect = if spec.name == TOOL_REMINDER_LIST
+                || spec.name == TOOL_TASK_LIST
+                || spec.name == TOOL_TASK_DETAIL
+            {
                 ToolEffect::ReadOnly
             } else {
                 ToolEffect::Mutating

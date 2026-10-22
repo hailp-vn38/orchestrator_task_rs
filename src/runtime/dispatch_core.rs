@@ -3,15 +3,15 @@
 
 use std::sync::Arc;
 
-use orchestrator_agent_rs::{ErrorCode as OrchErrorCode, RunStatus};
+use orchestrator_agent_rs::{ErrorCode as OrchErrorCode, PageRequest, RunStatus};
 
 use crate::error::{TaskError, TaskResult};
 use crate::runtime::{compute_next_cron_ms, parse_due_at_ms, watcher, SharedTaskCore};
 use crate::store::{new_id, now_ms, NewScheduleRow, NewTaskRow, TerminalUpdate};
 use crate::types::{
     CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView, ScheduleActionKind,
-    ScheduleKind, ScheduleStatus, ScheduleView, TaskEvent, TaskScope, TaskSource, TaskStatus,
-    TaskView,
+    ScheduleKind, ScheduleStatus, ScheduleView, TaskAgentMessageView, TaskDetailView, TaskEvent,
+    TaskScope, TaskSource, TaskStatus, TaskView,
 };
 
 impl SharedTaskCore {
@@ -405,10 +405,74 @@ impl SharedTaskCore {
 
         Ok(false)
     }
+
+    /// Lấy chi tiết đầy đủ của một Task kèm `FamilySnapshot` và các view thực thi của Root + Subagent.
+    pub(crate) async fn get_task_detail_internal(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+    ) -> TaskResult<TaskDetailView> {
+        self.ensure_open()?;
+        let task = self.store.get_task(scope, task_id).await?;
+        let followups = self.store.list_followups(&task.id).await?;
+        let family_snapshot = if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
+            let caller = scope.to_caller_context();
+            orch.snapshot(&caller, &task.session_id).await.ok()
+        } else {
+            None
+        };
+
+        Ok(TaskDetailView::from_parts(task, followups, family_snapshot))
+    }
+
+    /// Lấy lịch sử tin nhắn (`user`, `assistant`, `tool`) của Root Agent hoặc một Subagent cụ thể trong Task.
+    pub(crate) async fn get_task_agent_history_internal(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+        session_or_agent_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> TaskResult<Vec<TaskAgentMessageView>> {
+        self.ensure_open()?;
+        let task = self.store.get_task(scope, task_id).await?;
+        let orch = self.flows()?.get_flow(&task.flow_id)?;
+        let caller = scope.to_caller_context();
+
+        let target_session_id = match session_or_agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+            None => task.session_id.clone(),
+            Some(key) if key == task.session_id || key == task.agent_id => task.session_id.clone(),
+            Some(key) => {
+                let snap = orch.snapshot(&caller, &task.session_id).await?;
+                if let Some(child) = snap.children.iter().find(|c| c.session_id == key) {
+                    child.session_id.clone()
+                } else if let Some(child) = snap.children.iter().rev().find(|c| c.agent_id == key) {
+                    child.session_id.clone()
+                } else {
+                    return Err(TaskError::not_found(format!(
+                        "agent session '{key}' not found in task '{task_id}'"
+                    )));
+                }
+            }
+        };
+
+        let page_limit = limit
+            .unwrap_or(self.config.runtime.page_size)
+            .clamp(1, self.config.runtime.page_size);
+        let page = orch
+            .history(&caller, &target_session_id, PageRequest::first(page_limit))
+            .await?;
+
+        Ok(page
+            .items
+            .iter()
+            .map(TaskAgentMessageView::from_message_view)
+            .collect())
+    }
 }
 
 fn clip_preview(text: &str, max_chars: usize) -> String {
-    let trimmed = text.trim();
+    let cleaned = orchestrator_agent_rs::strip_thinking_blocks(text);
+    let trimmed = cleaned.trim();
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
     }

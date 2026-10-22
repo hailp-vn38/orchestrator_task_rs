@@ -8,7 +8,7 @@ use crate::error::{TaskError, TaskResult};
 use crate::runtime::{parse_due_at_ms, SharedTaskCore};
 use crate::tools::catalog::{
     TOOL_REMINDER_COMPLETE, TOOL_REMINDER_CREATE, TOOL_REMINDER_DELETE, TOOL_REMINDER_LIST,
-    TOOL_TASK_CANCEL, TOOL_TASK_CREATE, TOOL_TASK_FOLLOWUP, TOOL_TASK_LIST,
+    TOOL_TASK_CANCEL, TOOL_TASK_CREATE, TOOL_TASK_DETAIL, TOOL_TASK_FOLLOWUP, TOOL_TASK_LIST,
 };
 use crate::types::{
     CreateScheduleRequest, CreateTaskRequest, Priority, ScheduleActionKind, ScheduleFilter,
@@ -25,6 +25,7 @@ pub(crate) async fn execute_tool_raw(
         TOOL_TASK_CREATE => handle_task_create(core, scope, &args).await,
         TOOL_TASK_FOLLOWUP => handle_task_followup(core, scope, &args).await,
         TOOL_TASK_LIST => handle_task_list(core, scope, &args).await,
+        TOOL_TASK_DETAIL => handle_task_detail(core, scope, &args).await,
         TOOL_TASK_CANCEL => handle_task_cancel(core, scope, &args).await,
         TOOL_REMINDER_CREATE => handle_reminder_create(core, scope, &args).await,
         TOOL_REMINDER_LIST => handle_reminder_list(core, scope, &args).await,
@@ -148,6 +149,30 @@ async fn handle_task_list(
         "total": page.total,
         "tasks": page.items,
     }))
+}
+
+async fn handle_task_detail(
+    core: &Arc<SharedTaskCore>,
+    scope: &TaskScope,
+    args: &Value,
+) -> TaskResult<Value> {
+    let task_id = req_str(args, "task_id")?;
+    let include_messages = args
+        .get("include_messages")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut detail = core.get_task_detail_internal(scope, task_id).await?;
+    if !include_messages {
+        if let Some(ref mut root) = detail.root_agent {
+            root.recent_messages.clear();
+        }
+        for sa in &mut detail.subagents {
+            sa.recent_messages.clear();
+        }
+    }
+
+    serde_json::to_value(&detail).map_err(|e| TaskError::storage("serialize task_detail", e))
 }
 
 async fn handle_task_cancel(

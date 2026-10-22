@@ -7,7 +7,8 @@ use crate::error::TaskResult;
 use crate::manager::TaskManager;
 use crate::tools::TaskToolSuite;
 use crate::types::{
-    AgentCatalogEntry, TaskDetailView, TaskFilter, TaskPage, TaskScope, TaskSubscription, TaskView,
+    AgentCatalogEntry, TaskAgentMessageView, TaskDetailView, TaskFilter, TaskPage, TaskScope,
+    TaskSubscription, TaskView,
 };
 
 impl TaskManager {
@@ -61,7 +62,8 @@ impl TaskManager {
     }
 
     /// Lấy chi tiết đầy đủ của một Task cho màn hình chi tiết trên UI View Task:
-    /// gồm bản ghi `TaskView`, danh sách `FollowupView` và `FamilySnapshot` từ `Orchestrator`.
+    /// gồm bản ghi `TaskView`, danh sách `FollowupView`, tổng hợp `execution_summary`,
+    /// chi tiết phiên `root_agent` + `subagents`, và `FamilySnapshot` từ `Orchestrator`.
     pub async fn get_task_detail(&self, task_id: &str) -> TaskResult<TaskDetailView> {
         let scope = &self.core.config.default_scope;
         self.get_task_detail_scoped(scope, task_id).await
@@ -72,21 +74,34 @@ impl TaskManager {
         scope: &TaskScope,
         task_id: &str,
     ) -> TaskResult<TaskDetailView> {
-        self.core.ensure_open()?;
-        let task = self.core.store.get_task(scope, task_id).await?;
-        let followups = self.core.store.list_followups(&task.id).await?;
-        let family_snapshot = if let Ok(orch) = self.core.flows()?.get_flow(&task.flow_id) {
-            let caller = scope.to_caller_context();
-            orch.snapshot(&caller, &task.session_id).await.ok()
-        } else {
-            None
-        };
+        self.core.get_task_detail_internal(scope, task_id).await
+    }
 
-        Ok(TaskDetailView {
-            task,
-            followups,
-            family_snapshot,
-        })
+    /// Lấy lịch sử tin nhắn (`user`, `assistant`, `tool`) của Root Agent hoặc một Subagent cụ thể
+    /// (truyền `session_id` hoặc `agent_id` vào `session_or_agent_id`; nếu `None` sẽ lấy của Root Agent)
+    /// thuộc một Task trong `default_scope`.
+    pub async fn get_task_agent_history(
+        &self,
+        task_id: &str,
+        session_or_agent_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> TaskResult<Vec<TaskAgentMessageView>> {
+        let scope = &self.core.config.default_scope;
+        self.get_task_agent_history_scoped(scope, task_id, session_or_agent_id, limit)
+            .await
+    }
+
+    /// Lấy lịch sử tin nhắn của Root Agent hoặc Subagent thuộc một Task trong `TaskScope` chỉ định.
+    pub async fn get_task_agent_history_scoped(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+        session_or_agent_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> TaskResult<Vec<TaskAgentMessageView>> {
+        self.core
+            .get_task_agent_history_internal(scope, task_id, session_or_agent_id, limit)
+            .await
     }
 
     /// Liệt kê các Task theo bộ lọc cho màn hình danh sách của UI View Task (`default_scope`).

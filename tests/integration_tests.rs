@@ -159,10 +159,42 @@ async fn two_phase_init_voice_catalog_and_task_lifecycle() {
         Some("Báo cáo phân tích đã hoàn tất.")
     );
 
-    // Kiểm tra TaskDetailView cho UI View Task
+    // Kiểm tra TaskDetailView cho UI View Task + `task_detail` tool + `get_task_agent_history`
     let detail = task_mgr.get_task_detail(&task_id).await.unwrap();
     assert_eq!(detail.task.status, TaskStatus::Completed);
     assert!(detail.family_snapshot.is_some());
+    let summary = detail
+        .execution_summary
+        .as_ref()
+        .expect("execution_summary present");
+    assert_eq!(summary.total_agents, 1);
+    assert_eq!(summary.subagent_count, 0);
+    assert!(summary.total_steps >= 1);
+    assert!(detail.find_agent_session("daily_root").is_some());
+
+    let detail_json = suite
+        .execute_raw(
+            "task_detail",
+            json!({
+                "task_id": task_id,
+                "include_messages": true
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detail_json["task"]["id"], task_id);
+    assert_eq!(detail_json["root_agent"]["agent_id"], "daily_root");
+    assert!(!detail_json["root_agent"]["recent_messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let root_history = task_mgr
+        .get_task_agent_history(&task_id, None, Some(10))
+        .await
+        .unwrap();
+    assert!(root_history.len() >= 2);
+    assert_eq!(root_history[0].role, "user");
 
     let page = task_mgr.list_tasks(&TaskFilter::default()).await.unwrap();
     assert_eq!(page.total, 1);
@@ -422,6 +454,96 @@ async fn host_tool_inside_daily_orch_and_followup_queue() {
                     t.output_preview.as_deref(),
                     Some("Đã thực hiện thêm yêu cầu followup.")
                 );
+                break;
+            }
+        }
+    }
+
+    // Kiểm tra chi tiết invocation của tool `reminder_create` trong `TaskDetailView`
+    let detail = task_mgr.get_task_detail(&task.id).await.unwrap();
+    let root_view = detail.root_agent.as_ref().expect("root_agent view");
+    assert_eq!(root_view.invocations.len(), 1);
+    assert_eq!(root_view.invocations[0].tool_name, "reminder_create");
+    assert_eq!(root_view.invocations[0].status, "completed");
+    assert_eq!(detail.followups.len(), 1);
+
+    task_mgr.shutdown().await.unwrap();
+    daily_orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn thinking_blocks_are_stripped_and_empty_thinking_fails_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are daily_root.").unwrap();
+
+    let task_cfg =
+        TaskConfig::new(dir.path().join("task_store")).with_default_target("daily", "daily_root");
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    let daily_gw = ScriptedGateway::new();
+    daily_gw.push_text("<think>\nPhân tích nội bộ dài...\n</think>\n\nKết quả cuối cùng sạch sẽ.");
+    daily_gw.push_text("<think>Suy nghĩ bị cắt cụt do hết max_output_tokens");
+
+    let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily assistant")
+        .with_prompt_path(&prompt_path);
+
+    let daily_orch = Arc::new(
+        Orchestrator::builder(OrchestratorConfig::new(
+            test_llm_config(),
+            vec![daily_agent],
+            dir.path().join("daily_store"),
+        ))
+        .with_gateway(daily_gw)
+        .build()
+        .await
+        .unwrap(),
+    );
+
+    let task_mgr = task_init
+        .register_flow("daily", daily_orch.clone())
+        .start()
+        .await
+        .unwrap();
+
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    // Task 1: có `<think>...</think>` kèm câu trả lời thật -> strip sạch trong output_preview
+    let t1 = task_mgr
+        .create_task(CreateTaskRequest::new("Task 1", "Kiểm tra lọc think"))
+        .await
+        .unwrap();
+
+    for _ in 0..30 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if t.id == t1.id {
+                assert_eq!(t.status, TaskStatus::Completed);
+                assert_eq!(
+                    t.output_preview.as_deref(),
+                    Some("Kết quả cuối cùng sạch sẽ.")
+                );
+                break;
+            }
+        }
+    }
+
+    // Task 2: chỉ có `<think>` bị cắt cụt (không có câu trả lời thực) -> chuyển sang Failed thay vì Completed rỗng
+    let t2 = task_mgr
+        .create_task(CreateTaskRequest::new("Task 2", "Kiểm tra cạn token think"))
+        .await
+        .unwrap();
+
+    for _ in 0..30 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if t.id == t2.id {
+                assert_eq!(t.status, TaskStatus::Failed);
+                assert_eq!(t.error_code.as_deref(), Some("PROVIDER_PROTOCOL_ERROR"));
                 break;
             }
         }

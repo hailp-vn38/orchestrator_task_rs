@@ -49,7 +49,7 @@ impl TaskManagerInit {
         build_reminder_host_tools(Arc::clone(&self.core))
     }
 
-    /// Xuất toàn bộ 8 `HostTool` (`task_*` + `reminder_*`).
+    /// Xuất toàn bộ 9 `HostTool` (`task_*` + `reminder_*`).
     pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         build_all_host_tools(Arc::clone(&self.core))
     }
