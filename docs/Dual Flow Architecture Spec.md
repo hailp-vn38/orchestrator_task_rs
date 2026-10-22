@@ -110,10 +110,13 @@ flowchart TB
 
 Đây là công cụ duy nhất ở **Flow 2** được phép đẩy tri thức mới vào hệ thống Wiki:
 - **Nơi đăng ký:** Chỉ đăng ký trong `daily_orch` và cấp cho subagent `report_stager`.
-- **Cơ chế hoạt động:**
-  1. Gọi [`WikiEngine::write_topic_source`](file:///Users/lamphuchai/Desktop/project_rust/llm-wiki-rs/src/lib.rs#L258-L298) để tạo file Markdown chuẩn tại `sources/<domain>/<topic>/<file_stem>.md` với đầy đủ YAML frontmatter (`category: "raw_source"`, `domain`, `topic`, `tags`, `qmd.metadata`).
-  2. Gọi `autoflow_notify.notify_one()` để đánh thức Background Worker của **Flow 1** ngay lập tức.
-  3. Trả về đường dẫn `source_rel_path` và `#docid` cho Flow 2 để báo cáo lại cho người dùng.
+- **Cơ chế hoạt động & Cổng bảo vệ (học từ Javis OS Self-Learning):**
+  1. **Provenance Gate (`provenance`):** Hỗ trợ `"user"`, `"source"`, `"verified_synthesis"` (mặc định) và `"assistant"`. Chặn cứng (`PROVENANCE_BLOCKED`) nếu `provenance == "assistant"` để ngăn AI tự suy diễn rồi hợp thức hóa thành nguồn tri thức chuẩn.
+  2. **Secret & Prompt-Injection Gate:** Quét tĩnh `title` và `markdown_body` (0 token) để từ chối khóa bí mật/token hoặc chỉ thị prompt injection (`CONTENT_POLICY_BLOCKED`) và kiểm tra độ dài thực chất tối thiểu (`>= 20` ký tự, `INSUFFICIENT_SUBSTANCE`).
+  3. **Conflict & Open Questions Metadata:** Tự động ghi `provenance`, `origin: "daily-flow-staged"`, `target_hint`, `conflict_with` vào YAML frontmatter và nối mục `## Mâu thuẫn & Câu hỏi mở` (`> [!WARNING] Contradiction / Caveat`) khi có `conflict_with` hoặc `open_questions`.
+  4. Gọi [`WikiEngine::write_topic_source`](file:///Users/lamphuchai/Desktop/project_rust/llm-wiki-rs/src/lib.rs#L258-L298) để tạo file Markdown chuẩn tại `sources/<domain>/<topic>/<file_stem>.md`.
+  5. Gọi `autoflow_notify.notify_one()` để đánh thức Background Worker của **Flow 1** (có bảo vệ bằng `AutoflowVaultSignature` chống lặp vô tận khi Vault không đổi).
+  6. Trả về đường dẫn `source_rel_path` và `#docid` cho Flow 2 để báo cáo lại cho người dùng.
 
 #### Đặc tả JSON Schema của `add_to_sources`:
 ```json
@@ -135,16 +138,30 @@ flowchart TB
     },
     "markdown_body": {
       "type": "string",
-      "description": "Toàn bộ nội dung Markdown đã được tổng hợp chi tiết từ cuộc thảo luận (bao gồm bối cảnh, quyết định, bảng biểu, code/công thức nếu có)."
+      "description": "Toàn bộ nội dung Markdown đã được tổng hợp chi tiết từ cuộc thảo luận (>= 20 ký tự thực chất, không chứa secret hay prompt injection)."
     },
     "tags": {
       "type": "array",
       "items": { "type": "string" },
       "description": "Danh sách tag phân cấp kebab-case (ví dụ: ['topic/software-architecture/agent-workflows', 'rust', 'orchestrator'])."
     },
+    "provenance": {
+      "type": "string",
+      "enum": ["user", "source", "verified_synthesis", "assistant"],
+      "description": "Nguồn gốc tri thức: 'user', 'source', 'verified_synthesis' (mặc định), hoặc 'assistant' (bị chặn nếu chỉ là suy đoán chưa xác minh của AI)."
+    },
     "target_hint": {
       "type": "string",
       "description": "Gợi ý tùy chọn cho Flow 1 về các trang Wiki hiện có liên quan mật thiết cần được cập nhật/bổ sung."
+    },
+    "conflict_with": {
+      "type": "string",
+      "description": "Trang Wiki hiện có chứa nội dung mâu thuẫn với bản tổng hợp này (để Flow 1 bảo toàn cả hai quan điểm thay vì ghi đè)."
+    },
+    "open_questions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Danh sách các câu hỏi mở hoặc giả thuyết chưa được xác minh cần ghi nhận riêng."
     }
   },
   "additionalProperties": false

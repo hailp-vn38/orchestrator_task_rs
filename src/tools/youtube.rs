@@ -402,45 +402,70 @@ pub fn fetch_playlist(url: &str) -> Result<Vec<(String, String)>, ToolError> {
 
 /// Gọi `yt-dlp` tải phụ đề VTT cho `video_id` theo thứ tự ngôn ngữ ưu tiên `langs` và làm sạch bằng `vtt_to_text`.
 pub fn fetch_transcript(work: &Path, id: &str, langs: &str) -> Result<String, ToolError> {
-    let sub_langs = langs
+    let parsed_langs: Vec<&str> = langs
         .split(',')
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .flat_map(|l| [format!("{l}-orig"), l.to_string()])
+        .collect();
+    let orig_langs = parsed_langs
+        .iter()
+        .map(|l| format!("{l}-orig"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sub_langs = parsed_langs
+        .iter()
+        .flat_map(|l| [format!("{l}-orig"), (*l).to_string()])
         .collect::<Vec<_>>()
         .join(",");
     let dir = work.join(id);
     std::fs::create_dir_all(&dir).map_err(|e| host_tool_err("IO", e.to_string()))?;
-    let output = std::process::Command::new("yt-dlp")
-        .args([
-            "--skip-download",
-            "--no-playlist",
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs",
-            &sub_langs,
-            "--sub-format",
-            "vtt",
-            "-o",
-        ])
-        .arg(dir.join("%(id)s.%(ext)s"))
-        .arg("--")
-        .arg(format!("https://www.youtube.com/watch?v={id}"))
-        .output()
-        .map_err(ytdlp_unavailable)?;
-    let mut subs: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| host_tool_err("IO", e.to_string()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "vtt"))
-        .collect();
+
+    let collect_vtts = |d: &Path| -> Result<Vec<PathBuf>, ToolError> {
+        Ok(std::fs::read_dir(d)
+            .map_err(|e| host_tool_err("IO", e.to_string()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "vtt"))
+            .collect())
+    };
+
+    let mut subs = collect_vtts(&dir)?;
+    let mut last_output = None;
+
+    // Ưu tiên tải phụ đề gốc (`*-orig`) trước để tránh bị YouTube trả HTTP 429 khi dịch tự động (`&tlang=`).
+    for candidate_langs in [&orig_langs, &sub_langs] {
+        if !subs.is_empty() || candidate_langs.is_empty() {
+            break;
+        }
+        let output = std::process::Command::new("yt-dlp")
+            .args([
+                "--skip-download",
+                "--no-playlist",
+                "--write-subs",
+                "--write-auto-subs",
+                "--sub-langs",
+                candidate_langs,
+                "--sub-format",
+                "vtt",
+                "-o",
+            ])
+            .arg(dir.join("%(id)s.%(ext)s"))
+            .arg("--")
+            .arg(format!("https://www.youtube.com/watch?v={id}"))
+            .output()
+            .map_err(ytdlp_unavailable)?;
+        last_output = Some(output);
+        subs = collect_vtts(&dir)?;
+    }
+
     if subs.is_empty() {
-        return Err(if output.status.success() {
-            host_tool_err(
+        return Err(match last_output {
+            Some(output) if !output.status.success() => {
+                host_tool_err("YTDLP_FAILED", stderr_tail(&output.stderr))
+            }
+            _ => host_tool_err(
                 "NO_TRANSCRIPT",
                 format!("Video {id} không có phụ đề cho: {sub_langs}"),
-            )
-        } else {
-            host_tool_err("YTDLP_FAILED", stderr_tail(&output.stderr))
+            ),
         });
     }
     let order: Vec<&str> = sub_langs.split(',').collect();

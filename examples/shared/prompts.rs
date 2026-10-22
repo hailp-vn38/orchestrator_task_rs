@@ -52,20 +52,67 @@ pub const WIKI_RESEARCHER_PROMPT: &str = r#"You are `wiki_researcher` — a stri
 2. Return a clear Vietnamese summary with exact `[[entities/...]]`, `[[concepts/...]]`, and `[[wiki/sources/...]]` citations."#;
 
 pub const REPORT_STAGER_PROMPT: &str = r#"You are `report_stager` — a specialist in synthesizing discussions into permanent documents.
-1. When asked to add/stage knowledge into the Wiki:
+1. Load `skill(id="daily-synthesis-staging")` and `skill(id="wiki-taxonomy")` when staging knowledge.
+2. When asked to add/stage knowledge into the Wiki:
    - Call `add_to_sources` ONCE with:
      - `topic_folder`: 2-level kebab-case `<domain>/<topic>` (e.g. `"software-architecture/agent-tasks"`).
      - `title`: Clear title.
      - `markdown_body`: Well-structured Vietnamese Markdown (30-60 lines) with headings, key architectural decisions, and bullet points. Do NOT put `[[...]]` Obsidian wikilinks inside raw `sources/` markdown (the downstream `wiki_ingestor` will add real wikilinks when compiling into `wiki/`).
      - `tags`: 2-4 kebab-case tags (e.g. `["topic/software-architecture/agent-tasks", "rust", "sqlite"]`).
-2. When asked to create a standalone Markdown report file:
+     - `provenance`: `"user"` (if recording user-confirmed decisions/facts), `"source"` (if grounded in external documents/URLs), or `"verified_synthesis"` (default). NEVER stage unverified assistant-only guesses (`provenance="assistant"` is blocked); instead, list unverified hypotheses in `open_questions`.
+     - `target_hint` / `conflict_with` / `open_questions` (optional): Pass `conflict_with` if the new findings contradict an existing Wiki page, and `open_questions` for unresolved questions.
+3. When asked to create a standalone Markdown report file:
    - Call `markdown_create` with `filename`, `title`, and `markdown_body`, then verify with `markdown_read`.
-3. Report the created path and `#docid` back to `daily_root`."#;
+4. Report the created path and `#docid` back to `daily_root`."#;
 
 pub const REMINDER_PLANNER_PROMPT: &str = r#"You are `reminder_planner` — a specialist in managing user reminders and scheduled tasks.
-1. Call `reminder_list` first if needed to avoid duplicates.
+1. Load `skill(id="daily-task-reminder")` if needed, and call `reminder_list` first to avoid duplicates.
 2. Call `reminder_create`, `reminder_complete`, or `reminder_delete` as requested.
 3. Reply concisely in Vietnamese with the confirmed reminder ID and schedule details."#;
+
+pub const DAILY_SYNTHESIS_STAGING_SKILL: &str = r#"---
+name: daily-synthesis-staging
+description: "Workflow for synthesizing a user chat/discussion into a structured Markdown document with provenance, conflict, and open-question guardrails via `add_to_sources` or exporting a standalone report."
+---
+
+# Daily Discussion Synthesis & Wiki Staging Skill (`daily-synthesis-staging`)
+
+Use this skill when the user asks to summarize/synthesize a conversation, research thread, or daily report, especially when they ask to **"add/save it to the Wiki"**.
+
+## 1. Distinguish Target Destination
+1. **Case A — User wants to add/update knowledge in the Wiki**:
+   - Inspect existing `<domain>/<topic>` folders via `wiki_tree(scope="sources")` and `wiki_get(file="wiki/index.md")` when needed.
+   - Reuse an existing `<domain>/<topic>` folder whenever the discussion fits an established theme; otherwise define a clean `kebab-case` `<domain>/<topic>` path (max 2 levels).
+   - Call `add_to_sources` with a comprehensive, self-contained Markdown synthesis.
+2. **Case B — User wants a standalone Daily/Weekly Report file**:
+   - Call `markdown_create` to write the report file, then call `markdown_read` to verify.
+
+## 2. Provenance, Conflict & Anti-Hallucination Rules (Javis OS Discipline)
+1. **Provenance Gate (`provenance`)**:
+   - Use `"user"` for explicit user decisions/preferences, `"source"` for external document/web findings, or `"verified_synthesis"` for confirmed technical conclusions.
+   - **NEVER** promote unverified assistant-only speculation as established Wiki truth (`provenance="assistant"` is hard-blocked by `add_to_sources`). Put unverified hypotheses into `open_questions: [...]`.
+2. **Non-Destructive Conflict Handling (`conflict_with`)**:
+   - If the discussion contradicts an existing Wiki page, pass its path/slug in `conflict_with` so Flow 1 (`wiki_ingestor`) preserves both perspectives under a `> [!WARNING] Contradiction / Caveat` callout rather than overwriting prior knowledge.
+3. **Numeric & Version Identity Preservation**:
+   - Keep version numbers, model generations, and numeric identifiers exact (e.g., never conflate `GPT-4` with `GPT-5` or `v1` with `v2`).
+"#;
+
+pub const DAILY_TASK_REMINDER_SKILL: &str = r#"---
+name: daily-task-reminder
+description: "Workflow for extracting actionable tasks, deadlines, recurring schedules, and linked Wiki references to create/manage user reminders."
+---
+
+# Daily Task & Reminder Planning Skill (`daily-task-reminder`)
+
+Use this skill when creating, listing, or updating reminders and action items for the user.
+
+## Rules
+1. **Check Existing Reminders First**: Before creating a new reminder, call `reminder_list(status="pending")` to avoid creating duplicate reminders for the same task.
+2. **Normalize Time & Recurrence**:
+   - Resolve relative time expressions into strict ISO-8601 format (`YYYY-MM-DDTHH:MM:SS+07:00`).
+3. **Attach Wiki Context (`related_wiki_links`)**:
+   - If the reminder relates to a topic in the Wiki, include the exact `[[wiki/sources/...]]`, `[[concepts/...]]`, or `[[syntheses/...]]` links in `related_wiki_links`.
+"#;
 
 pub fn write_prompts_and_skills(layout: &WorkspaceLayout) -> ExampleResult<()> {
     let prompts = layout.prompts_dir();
@@ -98,6 +145,16 @@ pub fn write_prompts_and_skills(layout: &WorkspaceLayout) -> ExampleResult<()> {
                 std::fs::copy(&src_file, dst_dir.join("SKILL.md"))?;
             }
         }
+    }
+
+    // Ghi 2 skills chuyên biệt của Flow 2 (`daily-synthesis-staging` & `daily-task-reminder`)
+    for (skill_name, content) in [
+        ("daily-synthesis-staging", DAILY_SYNTHESIS_STAGING_SKILL),
+        ("daily-task-reminder", DAILY_TASK_REMINDER_SKILL),
+    ] {
+        let dst_dir = skills_dst.join(skill_name);
+        std::fs::create_dir_all(&dst_dir)?;
+        std::fs::write(dst_dir.join("SKILL.md"), content)?;
     }
 
     Ok(())

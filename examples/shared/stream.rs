@@ -214,9 +214,15 @@ pub async fn stream_until_complete(
     tokio::pin!(deadline);
 
     loop {
-        if pending_task_ids.is_empty() && (!wait_for_autoflow || saw_autoflow) {
+        if pending_task_ids.is_empty() {
             if wait_for_autoflow {
-                // Đợi ngắn (2.5s) xem Auto-Flow có kích hoạt chặng tiếp theo (Synthesis & Lint) ngay sau chặng trước không
+                // Đợi ngắn (6.5s nếu chưa thấy Autoflow, hoặc 2.5s giữa các chặng Autoflow)
+                // xem Auto-Flow có kích hoạt chặng tiếp theo không; nếu không có Task Autoflow mới thì kết thúc ngay.
+                let grace = if saw_autoflow {
+                    Duration::from_millis(2500)
+                } else {
+                    Duration::from_millis(6500)
+                };
                 tokio::select! {
                     item = sub.recv() => match item {
                         Some(TaskFeedItem::Event(ev)) => {
@@ -224,6 +230,7 @@ pub async fn stream_until_complete(
                             if let TaskEvent::TaskCreated { task } = ev {
                                 if task.source == TaskSource::Autoflow {
                                     pending_task_ids.insert(task.id);
+                                    saw_autoflow = true;
                                     continue;
                                 }
                             }
@@ -231,7 +238,7 @@ pub async fn stream_until_complete(
                         }
                         Some(TaskFeedItem::ResyncRequired) | None => break,
                     },
-                    () = tokio::time::sleep(Duration::from_millis(2500)) => break,
+                    () = tokio::time::sleep(grace) => break,
                 }
             } else {
                 break;

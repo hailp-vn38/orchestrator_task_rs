@@ -104,7 +104,7 @@ async fn main() -> ExampleResult<()> {
         "\n=== [2. LIVE TASK STREAM (Collect PDF -> Auto-Flow Ingest -> Auto-Flow Synthesis & Lint)] ==="
     );
     let completed =
-        stream_until_complete(&mut sub, pending, true, Duration::from_secs(420)).await?;
+        stream_until_complete(&mut sub, pending, true, Duration::from_secs(1800)).await?;
 
     println!("\n=== [3. Danh sách Tasks trong `tasks.db` sau khi xử lý PDF] ===");
     let page = app.task_mgr.list_tasks(&TaskFilter::default()).await?;

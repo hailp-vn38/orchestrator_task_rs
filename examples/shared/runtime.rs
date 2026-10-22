@@ -194,7 +194,7 @@ impl HomelabExampleApp {
                     "markdown_create",
                     "markdown_read",
                 ])
-                .with_allowed_skills(["wiki-taxonomy"])
+                .with_allowed_skills(["wiki-taxonomy", "daily-synthesis-staging"])
                 .with_steps(12),
             AgentDefinition::new("reminder_planner", "live", &model)
                 .with_mode(AgentMode::Subagent)
@@ -203,11 +203,13 @@ impl HomelabExampleApp {
                 .with_context_limit_tokens(context_limit_tokens)
                 .with_max_output_tokens(max_output_tokens)
                 .with_allowed_tools([
+                    "skill",
                     "reminder_create",
                     "reminder_list",
                     "reminder_complete",
                     "reminder_delete",
                 ])
+                .with_allowed_skills(["daily-task-reminder"])
                 .with_steps(10),
             // === Luồng Biên dịch & Kiểm toán Wiki (`wiki_root`) ===
             AgentDefinition::new("wiki_root", "live", &model)
@@ -220,7 +222,7 @@ impl HomelabExampleApp {
                 .with_max_output_tokens(max_output_tokens)
                 .with_allowed_tools(["subagent"])
                 .with_allowed_subagents(["source_collector", "wiki_ingestor", "wiki_curator"])
-                .with_steps(25),
+                .with_steps(40),
             AgentDefinition::new("source_collector", "live", &model)
                 .with_mode(AgentMode::Subagent)
                 .with_description(
@@ -236,12 +238,9 @@ impl HomelabExampleApp {
                     "yt_list_playlist",
                     "yt_fetch_transcript",
                     "wiki_tree",
-                    "wiki_get",
-                    "wiki_write_file",
-                    "wiki_patch_file",
                 ])
                 .with_allowed_skills(["wiki-taxonomy"])
-                .with_steps(30),
+                .with_steps(35),
             AgentDefinition::new("wiki_ingestor", "live", &model)
                 .with_mode(AgentMode::Subagent)
                 .with_description("Compiles raw sources into wiki/sources/ and creates/patches entity & concept pages.")
@@ -260,7 +259,7 @@ impl HomelabExampleApp {
                     "wiki_patch_file",
                 ])
                 .with_allowed_skills(["wiki-taxonomy", "wiki-ingest"])
-                .with_steps(20),
+                .with_steps(35),
             AgentDefinition::new("wiki_curator", "live", &model)
                 .with_mode(AgentMode::Subagent)
                 .with_description("Creates topic syntheses and repairs structural issues via wiki_lint.")
@@ -281,7 +280,7 @@ impl HomelabExampleApp {
                     "wiki_schema",
                 ])
                 .with_allowed_skills(["wiki-taxonomy", "wiki-query", "wiki-lint"])
-                .with_steps(20),
+                .with_steps(35),
         ];
 
         let mut orch_cfg =

@@ -789,3 +789,228 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
     task_mgr.shutdown().await.unwrap();
     orch.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn javis_guardrails_provenance_policy_and_autoflow_change_signature() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = WorkspaceLayout::new(dir.path().join("workspace"));
+    layout.ensure_dirs().unwrap();
+
+    let prompt_path = layout.prompts_dir().join("agent.md");
+    std::fs::write(&prompt_path, "You are a guarded Dual-Flow agent.").unwrap();
+
+    let engine = Arc::new(WikiEngine::open(layout.wiki_vault_dir()).unwrap());
+    engine.apply_template(WikiTemplateId::Research).unwrap();
+    let autoflow_notify = Arc::new(Notify::new());
+
+    let runtime_cfg = TaskRuntimeConfig {
+        scheduler_tick: Duration::from_millis(40),
+        autoflow_poll_interval: Duration::from_millis(80),
+        ..Default::default()
+    };
+
+    let task_init = TaskManager::prepare(
+        TaskConfig::from_layout(&layout)
+            .with_default_agent("daily_root")
+            .with_runtime(runtime_cfg),
+    )
+    .await
+    .unwrap();
+
+    let toolkit = WorkspaceToolKit::from_layout(&layout, engine.clone(), autoflow_notify.clone());
+
+    let gw = ScriptedGateway::new();
+    // Turn 1 của daily_root: thử 3 lệnh `add_to_sources` bị chặn (provenance="assistant", secret, quá ngắn)
+    // và 1 lệnh hợp lệ có đầy đủ `provenance="user"`, `conflict_with`, `open_questions`.
+    gw.push_tool_calls(
+        "Testing add_to_sources guardrails",
+        vec![
+            (
+                "call_assistant_blocked",
+                "add_to_sources",
+                json!({
+                    "topic_folder": "software-architecture/self-learning",
+                    "title": "Unverified AI Speculation",
+                    "markdown_body": "This is an unverified claim invented solely by the assistant without user or source backing.",
+                    "provenance": "assistant"
+                }),
+            ),
+            (
+                "call_secret_blocked",
+                "add_to_sources",
+                json!({
+                    "topic_folder": "software-architecture/self-learning",
+                    "title": "Leaked Key Note",
+                    "markdown_body": "Production credential sk-proj-1234567890abcdef should never enter Wiki sources.",
+                    "provenance": "user"
+                }),
+            ),
+            (
+                "call_short_blocked",
+                "add_to_sources",
+                json!({
+                    "topic_folder": "software-architecture/self-learning",
+                    "title": "Too Short",
+                    "markdown_body": "ok",
+                    "provenance": "user"
+                }),
+            ),
+            (
+                "call_valid_staged",
+                "add_to_sources",
+                json!({
+                    "topic_folder": "software-architecture/self-learning",
+                    "file_stem": "javis-guardrails",
+                    "title": "Javis Guardrails in Dual-Flow",
+                    "markdown_body": "## Quyết định Kiến trúc\nTách biệt hoàn toàn đề xuất của AI với quyền ghi Wiki và kiểm tra chữ ký thay đổi Vault trước khi chạy Lint.",
+                    "tags": ["topic/software-architecture/self-learning", "rust"],
+                    "provenance": "user",
+                    "target_hint": "concepts/software-architecture/dual-flow",
+                    "conflict_with": "concepts/software-architecture/legacy-autoflow",
+                    "open_questions": ["Cần đo thêm ngưỡng debounce tối ưu cho homelab"]
+                }),
+            ),
+        ],
+    );
+    gw.push_text("Đã kiểm tra xong các cổng bảo vệ của add_to_sources.");
+    // Phản hồi cho Auto-Flow Task #1 (không sửa đổi Vault để kiểm tra Anti-Stall & Change Signature)
+    gw.push_text("Auto-Flow Stage 1 finished without mutating vault.");
+    // Phản hồi cho Auto-Flow Task #2 (chỉ chạy sau khi thực sự có file nguồn thứ 2 làm đổi chữ ký Vault)
+    gw.push_text("Auto-Flow Stage 2 ran after new source changed vault signature.");
+
+    let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily root")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["add_to_sources"])
+        .with_steps(6);
+
+    let wiki_agent = AgentDefinition::new("wiki_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Wiki root")
+        .with_prompt_path(&prompt_path)
+        .with_steps(6);
+
+    let mut builder = Orchestrator::builder(OrchestratorConfig::new(
+        test_llm_config(),
+        vec![daily_agent, wiki_agent],
+        layout.orchestrator_store_dir(),
+    ))
+    .with_gateway(gw);
+
+    for tool in toolkit.all_host_tools(&task_init) {
+        builder = builder.register_tool(tool);
+    }
+    let orch = Arc::new(builder.build().await.unwrap());
+
+    let task_mgr = task_init
+        .with_orchestrator(orch.clone())
+        .with_wiki_autoflow(WikiAutoFlowBinding::for_agent(
+            engine.clone(),
+            autoflow_notify.clone(),
+            "wiki_root",
+        ))
+        .start()
+        .await
+        .unwrap();
+
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    let daily_task = task_mgr
+        .create_task(CreateTaskRequest::new(
+            "Test Guardrails",
+            "Run add_to_sources guardrail checks.",
+        ))
+        .await
+        .unwrap();
+
+    // Đợi cả `daily_task` và `Autoflow` Task #1 hoàn tất
+    let mut completed_ids = Vec::new();
+    for _ in 0..80 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            assert_eq!(t.status, TaskStatus::Completed);
+            completed_ids.push((t.id.clone(), t.source));
+            if completed_ids.len() >= 2 {
+                break;
+            }
+        }
+    }
+    assert_eq!(completed_ids.len(), 2);
+
+    // Kiểm tra 3 lệnh đầu bị chặn và chỉ có đúng 1 file nguồn hợp lệ được ghi vào `sources/`
+    assert_eq!(engine.status().unwrap().sources_count, 1);
+    let detail = task_mgr.get_task_detail(&daily_task.id).await.unwrap();
+    let root = detail.root_agent.expect("root session");
+    assert_eq!(root.invocations.len(), 4);
+    assert_eq!(root.invocations[0].status, "failed");
+    assert_eq!(root.invocations[1].status, "failed");
+    assert_eq!(root.invocations[2].status, "failed");
+    assert_eq!(root.invocations[3].status, "completed");
+
+    // Kiểm tra nội dung file nguồn đã ghi có frontmatter provenance/conflict_with và callout Câu hỏi mở
+    let staged_raw = std::fs::read_to_string(
+        layout
+            .wiki_vault_dir()
+            .join("sources/software-architecture/self-learning/javis-guardrails.md"),
+    )
+    .unwrap();
+    assert!(staged_raw.contains("provenance: \"user\""));
+    assert!(
+        staged_raw.contains("conflict_with: \"concepts/software-architecture/legacy-autoflow\"")
+    );
+    assert!(staged_raw.contains("## Mâu thuẫn & Câu hỏi mở (Conflict & Open Questions)"));
+    assert!(staged_raw.contains("Cần đo thêm ngưỡng debounce tối ưu cho homelab"));
+
+    // Bắn thêm `autoflow_notify` khi Vault KHÔNG thay đổi -> Change Signature Guard phải chặn, không tạo thêm Task Autoflow!
+    autoflow_notify.notify_one();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let autoflow_tasks_before = task_mgr
+        .list_tasks(&TaskFilter {
+            source: Some(TaskSource::Autoflow),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        autoflow_tasks_before.total, 1,
+        "Change Signature Guard must prevent duplicate Autoflow tasks when vault is unchanged"
+    );
+
+    // Bây giờ thêm một file nguồn mới làm thay đổi chữ ký Vault -> Autoflow được phép chạy Task #2!
+    engine
+        .write_topic_source(WriteTopicSourceRequest {
+            topic_folder: "software-architecture/self-learning".to_string(),
+            file_stem: Some("second-source".to_string()),
+            title: "Second Source".to_string(),
+            tags: vec!["topic/software-architecture/self-learning".to_string()],
+            extra_frontmatter: Vec::new(),
+            header_bullets: Vec::new(),
+            body_heading: None,
+            raw_body: "## New Content\nVault signature has now changed.".to_string(),
+            preview_chars: Some(200),
+        })
+        .unwrap();
+    autoflow_notify.notify_one();
+
+    let mut saw_second_autoflow = false;
+    for _ in 0..40 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if t.source == TaskSource::Autoflow {
+                saw_second_autoflow = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_second_autoflow,
+        "Autoflow should run again once vault signature changes"
+    );
+
+    task_mgr.shutdown().await.unwrap();
+    orch.shutdown().await.unwrap();
+}

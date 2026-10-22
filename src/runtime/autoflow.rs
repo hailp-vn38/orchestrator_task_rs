@@ -3,6 +3,17 @@
 //! Khi nhận tín hiệu `autoflow_notify` (từ `add_to_sources` của Flow 2 hoặc khi nạp file mới vào `sources/`),
 //! Worker gọi `WikiEngine::build_next_autoflow_prompt(None)` và tạo một `Task` chính thức
 //! (`source = TaskSource::Autoflow`) để người dùng theo dõi trực tiếp trên UI View Task.
+//!
+//! ### Cơ chế Bảo vệ Học từ Javis OS Self-Learning:
+//! 1. **Vault Change Signature (`AutoflowVaultSignature`)**: Tính chữ ký trạng thái xác định của Vault
+//!    (`sources_count`, `wiki_count`, `uningested_sources`, `unsynthesized_topics`, `broken_links`,
+//!    `orphan_wiki_pages`, `missing_frontmatter_pages`). Nếu chữ ký không đổi kể từ lần chạy Auto-Flow
+//!    gần nhất, bỏ qua không sinh Task LLM trùng lặp.
+//! 2. **Anti-Stall Guard**: Trong chu kỳ đa chặng (`stage_count < 4`), nếu một chặng Auto-Flow kết thúc
+//!    nhưng không làm thay đổi chữ ký trạng thái của Vault (hoặc Task bị `Failed`/`Cancelled`), dừng ngay
+//!    chu kỳ thay vì lặp lại cùng một prompt gây tốn token.
+//! 3. **Anti-Amplification**: Tín hiệu `notify` tích tụ trong lúc Auto-Flow đang chạy sẽ được đối chiếu
+//!    với `last_attempted_signature` để không tự kích hoạt vòng lặp kiểm toán vô tận khi Vault không đổi.
 
 use std::sync::Arc;
 
@@ -13,7 +24,71 @@ use tracing::{debug, warn};
 
 use crate::config::DEFAULT_FLOW_ID;
 use crate::runtime::SharedTaskCore;
-use crate::types::{CreateTaskRequest, TaskScope, TaskSource};
+use crate::types::{CreateTaskRequest, TaskScope, TaskSource, TaskStatus};
+
+/// Chữ ký trạng thái xác định (deterministic fingerprint) của Wiki Vault tại một thời điểm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AutoflowVaultSignature {
+    pub sources_count: usize,
+    pub wiki_count: usize,
+    pub total_chunks: usize,
+    pub total_graph_links: usize,
+    pub uningested_sources: Vec<String>,
+    pub unsynthesized_topics: Vec<String>,
+    pub broken_links: Vec<(String, String, usize)>,
+    pub orphan_wiki_pages: Vec<String>,
+    pub missing_frontmatter_pages: Vec<String>,
+    pub is_healthy: bool,
+}
+
+impl AutoflowVaultSignature {
+    /// Thu thập chữ ký trạng thái hiện tại từ `WikiEngine`.
+    pub(crate) fn capture(engine: &WikiEngine) -> Option<Self> {
+        let status = engine.status().ok()?;
+        let lint = engine.lint_wiki().ok()?;
+        let mut unsynthesized_topics = engine.unsynthesized_topics().unwrap_or_default();
+        unsynthesized_topics.sort();
+
+        let mut uningested_sources: Vec<String> = lint
+            .uningested_sources
+            .iter()
+            .map(|s| s.source_rel_path.clone())
+            .collect();
+        uningested_sources.sort();
+
+        let mut broken_links: Vec<(String, String, usize)> = lint
+            .broken_links
+            .iter()
+            .map(|b| {
+                (
+                    b.source_rel_path.clone(),
+                    b.raw_target.clone(),
+                    b.line_number,
+                )
+            })
+            .collect();
+        broken_links.sort();
+
+        let mut orphan_wiki_pages = lint.orphan_wiki_pages.clone();
+        orphan_wiki_pages.sort();
+
+        let mut missing_frontmatter_pages = lint.missing_frontmatter_pages.clone();
+        missing_frontmatter_pages.sort();
+
+        Some(Self {
+            sources_count: status.sources_count,
+            wiki_count: status.wiki_count,
+            total_chunks: status.total_chunks,
+            total_graph_links: status.total_graph_links,
+            uningested_sources,
+            unsynthesized_topics,
+            broken_links,
+            orphan_wiki_pages,
+            missing_frontmatter_pages,
+            is_healthy: lint.is_healthy,
+        })
+    }
+}
 
 /// Cấu hình gắn kết `WikiEngine` và tín hiệu `autoflow_notify` vào `TaskManager`.
 #[derive(Clone)]
@@ -67,6 +142,7 @@ pub(crate) fn spawn_autoflow_loop(
             .clone()
             .unwrap_or_else(|| core.config.default_scope.clone());
         let target_key = format!("{}/{}", binding.flow_id, binding.agent_id);
+        let mut last_attempted_signature: Option<AutoflowVaultSignature> = None;
 
         loop {
             if core.shutdown.is_cancelled() {
@@ -129,12 +205,29 @@ pub(crate) fn spawn_autoflow_loop(
 
                 let next_prompt = match binding.engine.build_next_autoflow_prompt(None) {
                     Ok(Some(p)) => p,
-                    Ok(None) => break,
+                    Ok(None) => {
+                        last_attempted_signature = AutoflowVaultSignature::capture(&binding.engine);
+                        break;
+                    }
                     Err(e) => {
                         warn!("autoflow build_next_autoflow_prompt error: {e}");
                         break;
                     }
                 };
+
+                // Change Signature Guard: Nếu chữ ký trạng thái của Vault hoàn toàn không đổi
+                // so với lần vừa chạy Auto-Flow gần nhất, bỏ qua để tránh vòng lặp tự khuếch đại
+                // hoặc gọi LLM kiểm toán trùng lặp trên cùng một trạng thái dữ liệu.
+                let pre_sig = AutoflowVaultSignature::capture(&binding.engine);
+                if let (Some(ref current), Some(ref last)) = (&pre_sig, &last_attempted_signature) {
+                    if current == last {
+                        debug!(
+                            "autoflow skipped: vault signature unchanged since last autoflow attempt"
+                        );
+                        break;
+                    }
+                }
+                last_attempted_signature = pre_sig.clone();
 
                 let title = if next_prompt.starts_with("[AUTO-FLOW: NEW SOURCES DETECTED]") {
                     "Auto-Flow: Biên dịch nguồn mới vào Wiki".to_string()
@@ -161,16 +254,22 @@ pub(crate) fn spawn_autoflow_loop(
                         stage_count += 1;
                         debug!(task_id = %task.id, "spawned managed autoflow task");
                         // Đợi Watcher báo Task Auto-Flow này thực sự đạt trạng thái terminal
+                        let mut terminal_status = None;
                         loop {
-                            let already_done = core
+                            let current_status = core
                                 .store
                                 .get_task_unscoped(&task.id)
                                 .await
                                 .ok()
                                 .flatten()
-                                .is_none_or(|t| t.status.is_terminal());
-                            if already_done {
-                                break;
+                                .map(|t| t.status);
+                            match current_status {
+                                Some(st) if st.is_terminal() => {
+                                    terminal_status = Some(st);
+                                    break;
+                                }
+                                None => break,
+                                _ => {}
                             }
                             tokio::select! {
                                 biased;
@@ -184,6 +283,30 @@ pub(crate) fn spawn_autoflow_loop(
                         }
                         let _ = binding.engine.embed_pending(false);
                         let _ = binding.engine.rebuild_or_sync_index_md();
+
+                        // Nếu Task bị Failed hoặc Cancelled, không tự động chạy tiếp chặng kế tiếp
+                        if matches!(
+                            terminal_status,
+                            Some(TaskStatus::Failed | TaskStatus::Cancelled)
+                        ) {
+                            debug!(
+                                task_id = %task.id,
+                                status = ?terminal_status,
+                                "autoflow stage did not complete cleanly; stopping cycle"
+                            );
+                            break;
+                        }
+
+                        // Anti-Stall Guard: Cập nhật lại chữ ký sau khi rebuild index;
+                        // nếu chặng vừa rồi không làm thay đổi trạng thái Vault, dừng ngay chu kỳ.
+                        let post_sig = AutoflowVaultSignature::capture(&binding.engine);
+                        if pre_sig.is_some() && post_sig == pre_sig {
+                            debug!(
+                                task_id = %task.id,
+                                "autoflow stage finished with no vault changes; stopping cycle"
+                            );
+                            break;
+                        }
                     }
                     Err(e) => {
                         warn!("failed to spawn autoflow task: {e}");
