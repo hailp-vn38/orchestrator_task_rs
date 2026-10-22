@@ -18,6 +18,7 @@ pub mod markdown_report;
 pub mod pdf;
 pub mod toolkit;
 pub(crate) mod voice_handler;
+pub mod web;
 pub mod wiki_bridge;
 pub mod youtube;
 
@@ -27,6 +28,12 @@ pub use pdf::{
     AnydocSaveToSourcesTool, ConvertedPdfDoc, SharedPdfState,
 };
 pub use toolkit::WorkspaceToolKit;
+pub use web::{
+    clean_noise_tags, collapse_ws, decode_html_entities, extract_article, extract_feed_items,
+    extract_links, extract_metadata, find_elements, find_open_tags, get_attr,
+    locate_article_region, remove_html_comments, remove_tag_blocks, resolve_url, strip_tags,
+    web_host_tools, ExtractedArticle, HtmlTool, HtmlToolKind, HtmlWorkspace, HTML_TOOL_NAMES,
+};
 pub use wiki_bridge::{
     add_to_sources_host_tool, wiki_host_tools, wiki_readonly_host_tools, AddToSourcesTool,
     WikiEngineBridgeTool,

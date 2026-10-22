@@ -59,12 +59,16 @@ pub use error::{ErrorCode, TaskError, TaskResult};
 pub use manager::{TaskManager, TaskManagerInit};
 pub use runtime::WikiAutoFlowBinding;
 pub use tools::{
-    add_to_sources_host_tool, build_sample_technical_pdf, convert_document_with_anydoc,
-    fetch_playlist, fetch_transcript, pdf_host_tools, report_host_tools, wiki_host_tools,
+    add_to_sources_host_tool, build_sample_technical_pdf, clean_noise_tags, collapse_ws,
+    convert_document_with_anydoc, decode_html_entities, extract_article, extract_feed_items,
+    extract_links, extract_metadata, fetch_playlist, fetch_transcript, find_elements,
+    find_open_tags, get_attr, locate_article_region, pdf_host_tools, remove_html_comments,
+    remove_tag_blocks, report_host_tools, resolve_url, strip_tags, web_host_tools, wiki_host_tools,
     wiki_readonly_host_tools, youtube_host_tools, AddToSourcesTool, AnydocInspectPdfTool,
-    AnydocSaveToSourcesTool, ConvertedPdfDoc, MarkdownCreateTool, MarkdownReadTool,
-    PlaylistVideoEntry, SharedPdfState, TaskToolSpec, TaskToolSuite, WikiEngineBridgeTool,
-    WorkspaceToolKit, YoutubeCollectorEnv, YtFetchTranscriptTool, YtListPlaylistTool,
+    AnydocSaveToSourcesTool, ConvertedPdfDoc, ExtractedArticle, HtmlTool, HtmlToolKind,
+    HtmlWorkspace, MarkdownCreateTool, MarkdownReadTool, PlaylistVideoEntry, SharedPdfState,
+    TaskToolSpec, TaskToolSuite, WikiEngineBridgeTool, WorkspaceToolKit, YoutubeCollectorEnv,
+    YtFetchTranscriptTool, YtListPlaylistTool, HTML_TOOL_NAMES,
 };
 pub use types::{
     AgentCatalogEntry, CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView,

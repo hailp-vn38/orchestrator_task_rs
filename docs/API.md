@@ -996,9 +996,10 @@ for tool in toolkit.wiki_flow_host_tools() {
 | `toolkit.report_host_tools()` / `report_host_tools(reports_dir)` | `markdown_create`, `markdown_read` | Xuất và đọc báo cáo Markdown độc lập trong `reports/`. |
 | `toolkit.youtube_host_tools()` / `youtube_host_tools(yt_env)` | `yt_list_playlist`, `yt_fetch_transcript` | Liệt kê video và tải transcript từ YouTube Playlist bằng `yt-dlp`, lưu vào `sources/` kèm báo hiệu Auto-Flow. |
 | `toolkit.pdf_host_tools()` / `pdf_host_tools(pdf_state)` | `anydoc_inspect_pdf`, `anydoc_save_to_sources` | Chuyển đổi PDF/Office sang GFM Markdown bằng `anydoc`, lưu vào `sources/` kèm báo hiệu Auto-Flow. |
-| `toolkit.collector_host_tools()` | 4 tools (`anydoc_*` + `yt_*`) | Toàn bộ công cụ thu thập nguồn bên ngoài cho subagent `source_collector`. |
-| `toolkit.daily_flow_host_tools(&task_init)` | `wiki_*` (read-only) + `add_to_sources` + `markdown_*` + `reminder_*` | Bộ công cụ trọn gói cho Flow 2 (`daily_orch`). |
-| `toolkit.wiki_flow_host_tools()` | `wiki_*` (full) + `anydoc_*` + `yt_*` | Bộ công cụ trọn gói cho Flow 1 (`wiki_orch`). |
+| `toolkit.web_host_tools()` / `web_host_tools(html_workspace)` | 6 tools `HTML_TOOL_NAMES`: `fetch_html`, `html_extract_metadata`, `html_extract_article`, `html_extract_feed`, `html_extract_links`, `html_select_elements` | Tải trang web qua `curl` (có cache trong `HtmlWorkspace` & lưu artifact) và bóc tách metadata, bài viết, danh sách tin chuyên mục, liên kết và phần tử HTML. |
+| `toolkit.collector_host_tools()` | 10 tools (`anydoc_*` + `yt_*` + `fetch_html`/`html_*`) | Toàn bộ công cụ thu thập nguồn bên ngoài (PDF, YouTube, Web/HTML). |
+| `toolkit.daily_flow_host_tools(&task_init)` | `wiki_*` (read-only) + `web_host_tools()` + `add_to_sources` + `markdown_*` + `reminder_*` | Bộ công cụ trọn gói cho Flow 2 (`daily_orch`). |
+| `toolkit.wiki_flow_host_tools()` | `wiki_*` (full) + `anydoc_*` + `yt_*` + `web_host_tools()` | Bộ công cụ trọn gói cho Flow 1 (`wiki_orch`). |
 | `toolkit.all_host_tools(&task_init)` | Toàn bộ công cụ của cả 2 Flow + `reminder_*` | Bộ công cụ trọn gói cho mô hình 1 `Orchestrator` hợp nhất. |
 | `toolkit.all_host_tools_with_tasks(&task_init)` | `all_host_tools` + 6 tool `task_*` | Bộ công cụ trọn gói kèm cả 6 tool điều phối `task_*`. |
 

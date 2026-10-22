@@ -2,8 +2,9 @@
 
 #[allow(unused_imports)]
 pub use orchestrator_task_rs::{
-    add_to_sources_host_tool, report_host_tools, wiki_host_tools, wiki_readonly_host_tools,
-    youtube_host_tools, AddToSourcesTool, MarkdownCreateTool, MarkdownReadTool, PlaylistVideoEntry,
+    add_to_sources_host_tool, report_host_tools, web_host_tools, wiki_host_tools,
+    wiki_readonly_host_tools, youtube_host_tools, AddToSourcesTool, ExtractedArticle, HtmlTool,
+    HtmlToolKind, HtmlWorkspace, MarkdownCreateTool, MarkdownReadTool, PlaylistVideoEntry,
     WikiEngineBridgeTool, WorkspaceToolKit, YoutubeCollectorEnv, YtFetchTranscriptTool,
-    YtListPlaylistTool,
+    YtListPlaylistTool, HTML_TOOL_NAMES,
 };

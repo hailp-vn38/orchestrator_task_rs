@@ -82,7 +82,7 @@ Flow phải chứa agent có thể làm root (`Primary` hoặc `All`); `daily_ro
 
 Scope mặc định là `owner_id = "personal"`, `workspace_id = "homelab"`; host có thể dùng các API `*_scoped` để chỉ định scope. Mỗi store chỉ được một `TaskManager` sở hữu tại một thời điểm. Dùng thư mục store riêng với store của Orchestrator và Wiki.
 
-Bộ tools điều phối gồm `task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `task_delete`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete` (lấy qua `task_host_tools()`, `reminder_host_tools()`, `all_host_tools()` hoặc `voice_tool_suite()`). Ngoài ra, `WorkspaceToolKit` cung cấp sẵn trọn bộ `HostTool` cho kiến trúc Dual-Flow (`wiki_host_tools`, `wiki_readonly_host_tools`, `add_to_sources_host_tool`, `report_host_tools`, `youtube_host_tools`, `pdf_host_tools`) để host lấy ra và đăng ký trực tiếp mà không cần viết lại.
+Bộ tools điều phối gồm `task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `task_delete`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete` (lấy qua `task_host_tools()`, `reminder_host_tools()`, `all_host_tools()` hoặc `voice_tool_suite()`). Ngoài ra, `WorkspaceToolKit` cung cấp sẵn trọn bộ `HostTool` cho kiến trúc Dual-Flow (`wiki_host_tools`, `wiki_readonly_host_tools`, `add_to_sources_host_tool`, `report_host_tools`, `youtube_host_tools`, `pdf_host_tools`, `web_host_tools`) để host lấy ra và đăng ký trực tiếp mà không cần viết lại.
 
 ## Kiểm tra cục bộ
 

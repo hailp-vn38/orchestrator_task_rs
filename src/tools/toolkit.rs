@@ -1,6 +1,6 @@
 //! `WorkspaceToolKit` — Bộ quản lý và khởi tạo trọn gói toàn bộ `HostTool` cho kiến trúc Dual-Flow
 //! (Wiki Engine, `add_to_sources`, Markdown Reports, YouTube Playlist Collector, PDF `anydoc` Collector,
-//! và Task/Reminder Tools từ `TaskManagerInit`).
+//! Web / HTML Extractor Tools, và Task/Reminder Tools từ `TaskManagerInit`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use crate::config::WorkspaceLayout;
 use crate::manager::TaskManagerInit;
 use crate::tools::markdown_report::report_host_tools;
 use crate::tools::pdf::{pdf_host_tools, SharedPdfState};
+use crate::tools::web::{web_host_tools, HtmlWorkspace};
 use crate::tools::wiki_bridge::{
     add_to_sources_host_tool, wiki_host_tools, wiki_readonly_host_tools,
 };
@@ -30,6 +31,7 @@ pub struct WorkspaceToolKit {
     pub read_budget: AdaptiveReadBudget,
     pub pdf_state: Arc<SharedPdfState>,
     pub yt_env: Arc<YoutubeCollectorEnv>,
+    pub html_workspace: Arc<HtmlWorkspace>,
 }
 
 impl WorkspaceToolKit {
@@ -39,6 +41,7 @@ impl WorkspaceToolKit {
     /// - `reports_dir` = `layout.reports_dir()`
     /// - `pdf_state` làm việc tại `<root>/work/pdf`
     /// - `yt_env` làm việc tại `<root>/work/yt`
+    /// - `html_workspace` làm việc tại `<root>/work/html`
     /// - `read_budget` mặc định cho context window `200_000` tokens
     pub fn from_layout(
         layout: &WorkspaceLayout,
@@ -46,13 +49,15 @@ impl WorkspaceToolKit {
         autoflow_notify: Arc<Notify>,
     ) -> Self {
         let work_dir = layout.root_dir().join("work");
-        Self::new(
+        let mut kit = Self::new(
             engine,
             autoflow_notify,
             layout.reports_dir(),
             work_dir.join("pdf"),
             work_dir.join("yt"),
-        )
+        );
+        kit.html_workspace = Arc::new(HtmlWorkspace::new(work_dir.join("html")));
+        kit
     }
 
     /// Khởi tạo `WorkspaceToolKit` với các đường dẫn thư mục tùy chỉnh.
@@ -63,16 +68,22 @@ impl WorkspaceToolKit {
         pdf_work_dir: impl Into<PathBuf>,
         yt_work_dir: impl Into<PathBuf>,
     ) -> Self {
+        let pdf_dir = pdf_work_dir.into();
+        let html_dir = pdf_dir
+            .parent()
+            .map(|p| p.join("html"))
+            .unwrap_or_else(|| pdf_dir.join("html"));
         let pdf_state = Arc::new(SharedPdfState::new(
             Arc::clone(&engine),
             Arc::clone(&autoflow_notify),
-            pdf_work_dir,
+            pdf_dir,
         ));
         let yt_env = Arc::new(YoutubeCollectorEnv::new(
             Arc::clone(&engine),
             Arc::clone(&autoflow_notify),
             yt_work_dir,
         ));
+        let html_workspace = Arc::new(HtmlWorkspace::new(html_dir));
         Self {
             engine,
             autoflow_notify,
@@ -80,7 +91,14 @@ impl WorkspaceToolKit {
             read_budget: AdaptiveReadBudget::for_context_limit(DEFAULT_CONTEXT_LIMIT_TOKENS),
             pdf_state,
             yt_env,
+            html_workspace,
         }
+    }
+
+    /// Tùy chỉnh thư mục lưu cache HTML nguyên bản cho `HtmlWorkspace`.
+    pub fn with_html_work_dir(mut self, html_work_dir: impl Into<PathBuf>) -> Self {
+        self.html_workspace = Arc::new(HtmlWorkspace::new(html_work_dir));
+        self
     }
 
     /// Ghi đè `AdaptiveReadBudget` cho các tool đọc của `WikiEngine`.
@@ -154,19 +172,27 @@ impl WorkspaceToolKit {
         pdf_host_tools(Arc::clone(&self.pdf_state))
     }
 
-    /// Xuất toàn bộ `HostTool` thu thập nguồn bên ngoài (`yt_list_playlist`, `yt_fetch_transcript`,
-    /// `anydoc_inspect_pdf`, `anydoc_save_to_sources`) cho subagent `source_collector`.
+    /// Xuất trọn bộ 6 `HostTool` tải và trích xuất Web/HTML (`fetch_html`, `html_extract_metadata`,
+    /// `html_extract_article`, `html_extract_feed`, `html_extract_links`, `html_select_elements`).
+    pub fn web_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
+        web_host_tools(Arc::clone(&self.html_workspace))
+    }
+
+    /// Xuất toàn bộ 10 `HostTool` thu thập nguồn bên ngoài (`anydoc_inspect_pdf`, `anydoc_save_to_sources`,
+    /// `yt_list_playlist`, `yt_fetch_transcript`, và 6 tool Web/HTML `fetch_html`, `html_*`).
     pub fn collector_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         let mut tools = self.pdf_host_tools();
         tools.extend(self.youtube_host_tools());
+        tools.extend(self.web_host_tools());
         tools
     }
 
     /// Xuất bộ `HostTool` chuẩn cho **Flow 2 (`daily_orch`)** khi tách riêng 2 instance `Orchestrator`:
-    /// gồm `wiki_readonly_host_tools()`, `add_to_sources`, `markdown_create`, `markdown_read`,
+    /// gồm `wiki_readonly_host_tools()`, `web_host_tools()`, `add_to_sources`, `markdown_create`, `markdown_read`,
     /// và 4 tool `reminder_*` từ `TaskManagerInit`.
     pub fn daily_flow_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>> {
         let mut tools = self.wiki_readonly_host_tools();
+        tools.extend(self.web_host_tools());
         tools.push(self.add_to_sources_host_tool());
         tools.extend(self.report_host_tools());
         tools.extend(init.reminder_host_tools());
@@ -174,7 +200,7 @@ impl WorkspaceToolKit {
     }
 
     /// Xuất bộ `HostTool` chuẩn cho **Flow 1 (`wiki_orch`)** khi tách riêng 2 instance `Orchestrator`:
-    /// gồm toàn bộ 14 tool `wiki_*` (đọc + ghi) và 4 tool thu thập nguồn (`anydoc_*` + `yt_*`).
+    /// gồm toàn bộ 14 tool `wiki_*` (đọc + ghi) và 10 tool thu thập nguồn (`anydoc_*` + `yt_*` + `fetch_html`/`html_*`).
     pub fn wiki_flow_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         let mut tools = self.collector_host_tools();
         tools.extend(self.wiki_host_tools());
@@ -182,7 +208,7 @@ impl WorkspaceToolKit {
     }
 
     /// Xuất toàn bộ `HostTool` chuẩn cho **1 instance `Orchestrator` hợp nhất** (chứa cả `daily_root` và `wiki_root`):
-    /// gồm `anydoc_*`, `yt_*`, `add_to_sources`, `markdown_*`, `reminder_*` và 14 tool `wiki_*`.
+    /// gồm `anydoc_*`, `yt_*`, `fetch_html`/`html_*`, `add_to_sources`, `markdown_*`, `reminder_*` và 14 tool `wiki_*`.
     pub fn all_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>> {
         let mut tools = self.collector_host_tools();
         tools.push(self.add_to_sources_host_tool());

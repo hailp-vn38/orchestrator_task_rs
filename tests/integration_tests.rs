@@ -636,7 +636,8 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
     // Kiểm tra các nhóm tool xuất ra từ WorkspaceToolKit
     assert_eq!(toolkit.pdf_host_tools().len(), 2);
     assert_eq!(toolkit.youtube_host_tools().len(), 2);
-    assert_eq!(toolkit.collector_host_tools().len(), 4);
+    assert_eq!(toolkit.web_host_tools().len(), 6);
+    assert_eq!(toolkit.collector_host_tools().len(), 10);
     assert_eq!(toolkit.report_host_tools().len(), 2);
     assert!(!toolkit.wiki_readonly_host_tools().is_empty());
     assert!(toolkit.wiki_host_tools().len() > toolkit.wiki_readonly_host_tools().len());
@@ -646,12 +647,21 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
     std::fs::write(&pdf_path, build_sample_technical_pdf()).unwrap();
     toolkit.pdf_state.set_input_paths(vec![pdf_path]);
 
+    // Nạp sẵn HTML mẫu vào `toolkit.html_workspace` để test các tool Web (`fetch_html`, `html_extract_article`)
+    let sample_url = "https://example.com/rust-agent-architecture.html";
+    toolkit.html_workspace.insert_cached_html(
+        sample_url,
+        r#"<!DOCTYPE html><html><head><title>Rust Agent Architecture</title></head>
+        <body><article><h1>Rust Agent Architecture</h1><h2>High-performance async task orchestration</h2>
+        <p>Background tasks and Dual-Flow knowledge compilation run on SQLite WAL.</p></article></body></html>"#,
+    );
+
     // Kịch bản Agent gọi các HostTool tái sử dụng:
-    // Bước 1: markdown_create + anydoc_inspect_pdf
+    // Bước 1: markdown_create + anydoc_inspect_pdf + fetch_html + html_extract_article
     // Bước 2: markdown_read + anydoc_save_to_sources + add_to_sources
     let gw = ScriptedGateway::new();
     gw.push_tool_calls(
-        "Creating markdown report and inspecting PDF",
+        "Creating markdown report, inspecting PDF, and extracting Web article",
         vec![
             (
                 "c1",
@@ -663,6 +673,12 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
                 }),
             ),
             ("c2", "anydoc_inspect_pdf", json!({ "doc_index": 1 })),
+            ("c_web1", "fetch_html", json!({ "url": sample_url })),
+            (
+                "c_web2",
+                "html_extract_article",
+                json!({ "url": sample_url }),
+            ),
         ],
     );
     gw.push_tool_calls(
@@ -709,6 +725,8 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
             "markdown_read",
             "anydoc_inspect_pdf",
             "anydoc_save_to_sources",
+            "fetch_html",
+            "html_extract_article",
             "add_to_sources",
             "wiki_tree",
         ])
@@ -766,7 +784,7 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
 
     let detail = task_mgr.get_task_detail(&task.id).await.unwrap();
     let root = detail.root_agent.expect("root session");
-    assert_eq!(root.invocations.len(), 5);
+    assert_eq!(root.invocations.len(), 7);
 
     task_mgr.shutdown().await.unwrap();
     orch.shutdown().await.unwrap();
