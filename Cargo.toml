@@ -1,6 +1,6 @@
 [package]
 name = "orchestrator-flow"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.89"
 description = "Background Task, Followup, Reminder/Cron Scheduler and Wiki Auto-Flow Manager for multi-Orchestrator hosts"
@@ -24,9 +24,9 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.15"
-llm-wiki-rs = { version = "0.1.2", path = "../llm-wiki-rs" }
+llm-wiki-rs = "0.1.2"
 lopdf = "0.45"
-orchestrator-agent = { version = "0.4.1", path = "../orchestrator_agent_rs" }
+orchestrator-agent = "0.4.1"
 pdf-inspector = "1.25"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -37,6 +37,6 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-orchestrator-agent = { version = "0.4.1", path = "../orchestrator_agent_rs", features = ["test-support"] }
+orchestrator-agent = { version = "0.4.1", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "test-util"] }
