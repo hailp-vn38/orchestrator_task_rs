@@ -2,14 +2,14 @@
 //! và các Subagent con bên trong một Task (ánh xạ từ `FamilySnapshot` của `Orchestrator`).
 
 use orchestrator_agent_rs::{
-    FamilySnapshot, InvocationSnapshot, MessageRole, MessageToolCall, MessageView, RunSnapshot,
-    RunStatus, SessionSnapshot,
+    FamilySnapshot, InvocationSnapshot, InvocationStatus, MessageRole, MessageToolCall,
+    MessageView, RunSnapshot, RunStatus, SessionSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Tổng hợp số liệu thực thi của toàn bộ cây Agent (Root + các Subagent) trong một Task.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskExecutionSummary {
     /// Tổng số phiên agent tham gia trong Task (`1` Root + `subagent_count`).
     pub total_agents: usize,
@@ -27,42 +27,120 @@ pub struct TaskExecutionSummary {
     pub total_tokens: u64,
     /// Tổng số lệnh gọi tool (`invocations`) của Root và mọi Subagent.
     pub total_tool_calls: usize,
+    /// Số lượng lệnh gọi tool đã hoàn tất thành công (`status == "completed"`).
+    pub succeeded_tool_calls: usize,
+    /// Số lượng lệnh gọi tool thất bại hoặc bị chặn bởi cổng kiểm duyệt (`status == "failed"`).
+    pub failed_tool_calls: usize,
+    /// Danh sách các mã lỗi (`error_code`) đã phát sinh từ các lệnh gọi tool thất bại (khử trùng lặp).
+    pub failed_error_codes: Vec<String>,
+    /// Danh sách đường dẫn `Source` (`sources/...`) đã được ghi thành công trong Task.
+    pub sources_written: Vec<String>,
+    /// Danh sách đường dẫn `Wiki Page` (`wiki/...`) đã được tạo hoặc cập nhật thành công trong Task.
+    pub wiki_pages_written: Vec<String>,
+    /// Kết quả `is_healthy` của lần kiểm toán `wiki_lint` gần nhất trong Task (nếu có).
+    pub last_lint_healthy: Option<bool>,
     /// `true` nếu danh sách Subagent con vượt trần snapshot của `Orchestrator`.
     pub children_truncated: bool,
 }
 
 impl TaskExecutionSummary {
     pub fn from_family_snapshot(snap: &FamilySnapshot) -> Self {
-        let mut active_agents = Vec::new();
-        let mut total_steps = 0u32;
-        let mut total_input_tokens = 0u64;
-        let mut total_output_tokens = 0u64;
-        let mut total_tool_calls = 0usize;
+        let subagent_count = snap.children.len();
+        let mut summary = Self {
+            total_agents: 1 + subagent_count,
+            subagent_count,
+            children_truncated: snap.children_truncated,
+            ..Self::default()
+        };
 
         for session in snap.sessions() {
-            total_tool_calls = total_tool_calls.saturating_add(session.invocations.len());
+            summary.total_tool_calls = summary
+                .total_tool_calls
+                .saturating_add(session.invocations.len());
+            for inv in &session.invocations {
+                summary.record_invocation(inv);
+            }
             if let Some(ref run) = session.latest_run {
-                if run.status == RunStatus::Running && !active_agents.contains(&session.agent_id) {
-                    active_agents.push(session.agent_id.clone());
+                if run.status == RunStatus::Running
+                    && !summary.active_agents.contains(&session.agent_id)
+                {
+                    summary.active_agents.push(session.agent_id.clone());
                 }
-                total_steps = total_steps.saturating_add(run.steps);
-                total_input_tokens = total_input_tokens.saturating_add(run.input_tokens);
-                total_output_tokens = total_output_tokens.saturating_add(run.output_tokens);
+                summary.total_steps = summary.total_steps.saturating_add(run.steps);
+                summary.total_input_tokens =
+                    summary.total_input_tokens.saturating_add(run.input_tokens);
+                summary.total_output_tokens = summary
+                    .total_output_tokens
+                    .saturating_add(run.output_tokens);
             }
         }
 
-        let subagent_count = snap.children.len();
-        Self {
-            total_agents: 1 + subagent_count,
-            subagent_count,
-            active_agents,
-            total_steps,
-            total_input_tokens,
-            total_output_tokens,
-            total_tokens: total_input_tokens.saturating_add(total_output_tokens),
-            total_tool_calls,
-            children_truncated: snap.children_truncated,
+        summary.total_tokens = summary
+            .total_input_tokens
+            .saturating_add(summary.total_output_tokens);
+        summary
+    }
+
+    fn record_invocation(&mut self, inv: &InvocationSnapshot) {
+        match inv.status {
+            InvocationStatus::Completed => {
+                self.succeeded_tool_calls = self.succeeded_tool_calls.saturating_add(1);
+                if let Some(meta) = inv.result.as_ref().and_then(|r| r.get("metadata")) {
+                    self.record_completed_metadata(meta);
+                }
+            }
+            InvocationStatus::Failed => {
+                self.failed_tool_calls = self.failed_tool_calls.saturating_add(1);
+                if let Some(ref code) = inv.error_code {
+                    push_unique(&mut self.failed_error_codes, code);
+                }
+            }
+            _ => {}
         }
+    }
+
+    fn record_completed_metadata(&mut self, meta: &Value) {
+        if let Some(vault_rel) = meta.get("vault_rel_path").and_then(Value::as_str) {
+            self.record_vault_path(vault_rel);
+        }
+
+        if let Some(wiki_rel) = meta.get("wiki_rel_path").and_then(Value::as_str) {
+            push_unique(&mut self.wiki_pages_written, wiki_rel);
+        }
+
+        let is_mutating = meta
+            .get("mutating")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || meta.get("content_hash").is_some();
+        let is_deleted = meta
+            .get("deleted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if is_mutating && !is_deleted {
+            if let Some(rel) = meta.get("rel_path").and_then(Value::as_str) {
+                self.record_vault_path(rel);
+            }
+        }
+
+        if let Some(healthy) = meta.get("is_healthy").and_then(Value::as_bool) {
+            self.last_lint_healthy = Some(healthy);
+        }
+    }
+
+    fn record_vault_path(&mut self, path: &str) {
+        if path.starts_with("sources/") {
+            push_unique(&mut self.sources_written, path);
+        } else if path.starts_with("wiki/") {
+            push_unique(&mut self.wiki_pages_written, path);
+        }
+    }
+}
+
+fn push_unique(list: &mut Vec<String>, item: &str) {
+    let trimmed = item.trim();
+    if !trimmed.is_empty() && !list.iter().any(|existing| existing == trimmed) {
+        list.push(trimmed.to_string());
     }
 }
 

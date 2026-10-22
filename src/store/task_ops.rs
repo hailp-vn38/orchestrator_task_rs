@@ -192,6 +192,23 @@ impl TaskStore {
         self.get_task_unscoped(task_id).await
     }
 
+    pub(crate) async fn update_task_summary(&self, task_id: &str, summary: &str) -> TaskResult<()> {
+        let now = now_ms();
+        sqlx::query(
+            "UPDATE tasks
+             SET progress_summary = ?2,
+                 updated_at = ?3
+             WHERE id = ?1",
+        )
+        .bind(task_id)
+        .bind(summary)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err("update task summary"))?;
+        Ok(())
+    }
+
     pub(crate) async fn delete_task(&self, scope: &TaskScope, task_id: &str) -> TaskResult<()> {
         let res =
             sqlx::query("DELETE FROM tasks WHERE id = ?1 AND owner_id = ?2 AND workspace_id = ?3")

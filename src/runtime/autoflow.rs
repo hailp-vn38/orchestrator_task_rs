@@ -9,7 +9,7 @@
 //!    (`sources_count`, `wiki_count`, `uningested_sources`, `unsynthesized_topics`, `broken_links`,
 //!    `orphan_wiki_pages`, `missing_frontmatter_pages`). Nếu chữ ký không đổi kể từ lần chạy Auto-Flow
 //!    gần nhất, bỏ qua không sinh Task LLM trùng lặp.
-//! 2. **Anti-Stall Guard**: Trong chu kỳ đa chặng (`stage_count < 4`), nếu một chặng Auto-Flow kết thúc
+//! 2. **Anti-Stall Guard**: Trong chu kỳ đa chặng (`stage_count < MAX_AUTOFLOW_STAGES_PER_CYCLE`), nếu một chặng Auto-Flow kết thúc
 //!    nhưng không làm thay đổi chữ ký trạng thái của Vault (hoặc Task bị `Failed`/`Cancelled`), dừng ngay
 //!    chu kỳ thay vì lặp lại cùng một prompt gây tốn token.
 //! 3. **Anti-Amplification**: Tín hiệu `notify` tích tụ trong lúc Auto-Flow đang chạy sẽ được đối chiếu
@@ -25,6 +25,10 @@ use tracing::{debug, warn};
 use crate::config::DEFAULT_FLOW_ID;
 use crate::runtime::SharedTaskCore;
 use crate::types::{CreateTaskRequest, TaskScope, TaskSource, TaskStatus};
+
+/// Số chặng tối đa được phép chạy liên tiếp trong một chu kỳ Auto-Flow khi mỗi chặng
+/// đều tạo ra tiến độ thực chất (`post_sig != pre_sig`).
+const MAX_AUTOFLOW_STAGES_PER_CYCLE: usize = 16;
 
 /// Chữ ký trạng thái xác định (deterministic fingerprint) của Wiki Vault tại một thời điểm.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,10 +173,10 @@ pub(crate) fn spawn_autoflow_loop(
                 }
             }
 
-            // Chạy tối đa 4 chặng liên tiếp cho mỗi lần kích hoạt:
+            // Chạy liên tiếp các chặng chừng nào mỗi chặng đều làm thay đổi trạng thái Vault:
             // Chặng 1+: `[AUTO-FLOW: NEW SOURCES DETECTED]` -> Chặng cuối: `[AUTO-FLOW: WIKI LINT]`
             let mut stage_count = 0usize;
-            while stage_count < 4 {
+            while stage_count < MAX_AUTOFLOW_STAGES_PER_CYCLE {
                 if core.shutdown.is_cancelled() {
                     break;
                 }
@@ -298,9 +302,17 @@ pub(crate) fn spawn_autoflow_loop(
                         }
 
                         // Anti-Stall Guard: Cập nhật lại chữ ký sau khi rebuild index;
-                        // nếu chặng vừa rồi không làm thay đổi trạng thái Vault, dừng ngay chu kỳ.
+                        // nếu chặng vừa rồi không làm thay đổi trạng thái Vault, ghi nhận rõ vào
+                        // `progress_summary` và dừng ngay chu kỳ.
                         let post_sig = AutoflowVaultSignature::capture(&binding.engine);
                         if pre_sig.is_some() && post_sig == pre_sig {
+                            let _ = core
+                                .store
+                                .update_task_summary(
+                                    &task.id,
+                                    "Auto-Flow stopped: no Vault changes produced in this stage",
+                                )
+                                .await;
                             debug!(
                                 task_id = %task.id,
                                 "autoflow stage finished with no vault changes; stopping cycle"

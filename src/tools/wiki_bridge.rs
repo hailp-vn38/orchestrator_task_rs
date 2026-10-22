@@ -84,10 +84,16 @@ impl HostTool for WikiEngineBridgeTool {
                 }
             }
         }
-        let out = self
+        let mut out = self
             .engine
             .execute_llm_tool_with_budget(&self.spec.name, args, self.read_budget)
             .map_err(|e| host_tool_err("WIKI_TOOL_ERROR", e.to_string()))?;
+
+        if self.effect == ToolEffect::Mutating {
+            if let Some(obj) = out.metadata.as_object_mut() {
+                obj.insert("mutating".to_string(), Value::Bool(true));
+            }
+        }
 
         if let Some(ref msg) = out.progress_message {
             ctx.progress(msg);

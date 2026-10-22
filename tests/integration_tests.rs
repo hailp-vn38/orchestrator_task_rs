@@ -875,7 +875,48 @@ async fn javis_guardrails_provenance_policy_and_autoflow_change_signature() {
     gw.push_text("Đã kiểm tra xong các cổng bảo vệ của add_to_sources.");
     // Phản hồi cho Auto-Flow Task #1 (không sửa đổi Vault để kiểm tra Anti-Stall & Change Signature)
     gw.push_text("Auto-Flow Stage 1 finished without mutating vault.");
-    // Phản hồi cho Auto-Flow Task #2 (chỉ chạy sau khi thực sự có file nguồn thứ 2 làm đổi chữ ký Vault)
+    // Phản hồi cho Auto-Flow Task #2 (chỉ chạy sau khi thực sự có file nguồn thứ 2 làm đổi chữ ký Vault):
+    // gọi wiki_ingest_source cho cả 2 nguồn + wiki_file_synthesis + wiki_lint để kiểm chứng wiki_pages_written & last_lint_healthy.
+    gw.push_tool_calls(
+        "Ingesting sources and running lint",
+        vec![
+            (
+                "call_ingest_1",
+                "wiki_ingest_source",
+                json!({
+                    "source_rel_path": "software-architecture/self-learning/javis-guardrails.md",
+                    "title": "Javis Guardrails",
+                    "one_line_summary": "Summary of Javis guardrails in Dual-Flow.",
+                    "wiki_markdown_body": "# Javis Guardrails\n\nSummary of [[sources/software-architecture/self-learning/javis-guardrails]] and [[wiki/syntheses/software-architecture/self-learning-synthesis]].\n",
+                    "tags": ["topic/software-architecture/self-learning"]
+                }),
+            ),
+            (
+                "call_ingest_2",
+                "wiki_ingest_source",
+                json!({
+                    "source_rel_path": "software-architecture/self-learning/second-source.md",
+                    "title": "Second Source",
+                    "one_line_summary": "Summary of second source.",
+                    "wiki_markdown_body": "# Second Source\n\nSummary of [[sources/software-architecture/self-learning/second-source]] and [[wiki/syntheses/software-architecture/self-learning-synthesis]].\n",
+                    "tags": ["topic/software-architecture/self-learning"]
+                }),
+            ),
+            (
+                "call_synth",
+                "wiki_file_synthesis",
+                json!({
+                    "rel_path": "syntheses/software-architecture/self-learning-synthesis.md",
+                    "query": "Self-learning guardrails synthesis",
+                    "title": "Self Learning Synthesis",
+                    "one_line_summary": "Synthesis of self-learning guardrails.",
+                    "markdown_body": "# Self Learning Synthesis\n\n- [[wiki/sources/software-architecture/self-learning/javis-guardrails]]\n- [[wiki/sources/software-architecture/self-learning/second-source]]\n",
+                    "tags": ["topic/software-architecture/self-learning"]
+                }),
+            ),
+            ("call_lint", "wiki_lint", json!({})),
+        ],
+    );
     gw.push_text("Auto-Flow Stage 2 ran after new source changed vault signature.");
 
     let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
@@ -889,6 +930,7 @@ async fn javis_guardrails_provenance_policy_and_autoflow_change_signature() {
         .with_mode(AgentMode::Primary)
         .with_description("Wiki root")
         .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["wiki_ingest_source", "wiki_file_synthesis", "wiki_lint"])
         .with_steps(6);
 
     let mut builder = Orchestrator::builder(OrchestratorConfig::new(
@@ -941,7 +983,38 @@ async fn javis_guardrails_provenance_policy_and_autoflow_change_signature() {
 
     // Kiểm tra 3 lệnh đầu bị chặn và chỉ có đúng 1 file nguồn hợp lệ được ghi vào `sources/`
     assert_eq!(engine.status().unwrap().sources_count, 1);
+    let af_task_1_id = completed_ids
+        .iter()
+        .find(|(_, src)| *src == TaskSource::Autoflow)
+        .map(|(id, _)| id.clone())
+        .expect("Autoflow Task #1 id");
+    // Đợi một nhịp ngắn để Auto-Flow cập nhật progress_summary sau khi đối chiếu post_sig == pre_sig
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let af_task_1 = task_mgr.get_task(&af_task_1_id).await.unwrap();
+    assert_eq!(
+        af_task_1.progress_summary.as_deref(),
+        Some("Auto-Flow stopped: no Vault changes produced in this stage")
+    );
+
     let detail = task_mgr.get_task_detail(&daily_task.id).await.unwrap();
+    let summary = detail.execution_summary.expect("execution summary");
+    assert_eq!(summary.succeeded_tool_calls, 1);
+    assert_eq!(summary.failed_tool_calls, 3);
+    assert_eq!(
+        summary.failed_error_codes,
+        vec![
+            "PROVENANCE_BLOCKED".to_string(),
+            "CONTENT_POLICY_BLOCKED".to_string(),
+            "INSUFFICIENT_SUBSTANCE".to_string(),
+        ]
+    );
+    assert_eq!(
+        summary.sources_written,
+        vec!["sources/software-architecture/self-learning/javis-guardrails.md".to_string()]
+    );
+    assert!(summary.wiki_pages_written.is_empty());
+    assert_eq!(summary.last_lint_healthy, None);
+
     let root = detail.root_agent.expect("root session");
     assert_eq!(root.invocations.len(), 4);
     assert_eq!(root.invocations[0].status, "failed");
@@ -995,21 +1068,32 @@ async fn javis_guardrails_provenance_policy_and_autoflow_change_signature() {
         .unwrap();
     autoflow_notify.notify_one();
 
-    let mut saw_second_autoflow = false;
+    let mut second_autoflow_id = None;
     for _ in 0..40 {
         if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
             tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
         {
             if t.source == TaskSource::Autoflow {
-                saw_second_autoflow = true;
+                second_autoflow_id = Some(t.id);
                 break;
             }
         }
     }
-    assert!(
-        saw_second_autoflow,
-        "Autoflow should run again once vault signature changes"
+    let af_task_2_id =
+        second_autoflow_id.expect("Autoflow should run again once vault signature changes");
+    let af2_detail = task_mgr.get_task_detail(&af_task_2_id).await.unwrap();
+    let af2_summary = af2_detail.execution_summary.expect("af2 execution summary");
+    assert_eq!(af2_summary.succeeded_tool_calls, 4);
+    assert_eq!(af2_summary.failed_tool_calls, 0);
+    assert_eq!(
+        af2_summary.wiki_pages_written,
+        vec![
+            "wiki/sources/software-architecture/self-learning/javis-guardrails.md".to_string(),
+            "wiki/sources/software-architecture/self-learning/second-source.md".to_string(),
+            "wiki/syntheses/software-architecture/self-learning-synthesis.md".to_string(),
+        ]
     );
+    assert_eq!(af2_summary.last_lint_healthy, Some(true));
 
     task_mgr.shutdown().await.unwrap();
     orch.shutdown().await.unwrap();
