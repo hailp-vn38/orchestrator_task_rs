@@ -13,3 +13,4 @@
 *.sqlite-wal
 *.sqlite-shm
 /.env.live
+*.pdf

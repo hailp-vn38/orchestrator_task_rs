@@ -11,6 +11,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use crate::config::DEFAULT_FLOW_ID;
 use crate::runtime::SharedTaskCore;
 use crate::types::{CreateTaskRequest, TaskScope, TaskSource};
 
@@ -40,6 +41,15 @@ impl WikiAutoFlowBinding {
         }
     }
 
+    /// Tạo cấu hình Auto-Flow cho kiến trúc 1 `Orchestrator` hợp nhất (`flow_id = "default"`).
+    pub fn for_agent(
+        engine: Arc<WikiEngine>,
+        notify: Arc<Notify>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self::new(engine, notify, DEFAULT_FLOW_ID, agent_id)
+    }
+
     pub fn with_scope(mut self, scope: TaskScope) -> Self {
         self.scope = Some(scope);
         self
@@ -63,26 +73,50 @@ pub(crate) fn spawn_autoflow_loop(
                 break;
             }
 
-            tokio::select! {
+            let notified = tokio::select! {
                 biased;
                 () = core.shutdown.cancelled() => break,
-                () = binding.notify.notified() => {}
-                () = tokio::time::sleep(poll_interval) => {}
+                () = binding.notify.notified() => true,
+                () = tokio::time::sleep(poll_interval) => false,
+            };
+
+            // Nếu chỉ là nhịp poll định kỳ (không phải tín hiệu `autoflow_notify` trực tiếp từ `add_to_sources`),
+            // chỉ khởi chạy chu kỳ Auto-Flow khi thực sự phát hiện file mới chưa ingest trong `sources/`.
+            if !notified {
+                let has_new_sources = binding
+                    .engine
+                    .lint_wiki()
+                    .map(|l| !l.uningested_sources.is_empty())
+                    .unwrap_or(false);
+                if !has_new_sources {
+                    continue;
+                }
             }
 
-            // Chạy liên tục từng chặng Auto-Flow tới khi `build_next_autoflow_prompt` trả `Ok(None)`
-            loop {
+            // Chạy tối đa 4 chặng liên tiếp cho mỗi lần kích hoạt:
+            // Chặng 1+: `[AUTO-FLOW: NEW SOURCES DETECTED]` -> Chặng cuối: `[AUTO-FLOW: WIKI LINT]`
+            let mut stage_count = 0usize;
+            while stage_count < 4 {
                 if core.shutdown.is_cancelled() {
                     break;
                 }
 
-                // Nếu đang có một Auto-Flow Task khác chạy trên flow này, đợi nó kết thúc trước
-                match core.store.has_active_autoflow_task(&binding.flow_id).await {
+                let active_done = core.autoflow_done_wake.notified();
+                tokio::pin!(active_done);
+                active_done.as_mut().enable();
+
+                // Nếu đang có Task đang chạy trên agent/flow của Auto-Flow (ví dụ `source_collector`
+                // đang tải playlist hoặc một Auto-Flow Task khác đang chạy), đợi nó kết thúc trước
+                match core
+                    .store
+                    .has_active_autoflow_task(&binding.flow_id, &binding.agent_id)
+                    .await
+                {
                     Ok(true) => {
                         tokio::select! {
                             biased;
                             () = core.shutdown.cancelled() => break,
-                            () = core.autoflow_done_wake.notified() => continue,
+                            () = &mut active_done => continue,
                             () = tokio::time::sleep(poll_interval) => continue,
                         }
                     }
@@ -124,20 +158,27 @@ pub(crate) fn spawn_autoflow_loop(
 
                 match core.create_and_start_task(&scope, req).await {
                     Ok(task) => {
+                        stage_count += 1;
                         debug!(task_id = %task.id, "spawned managed autoflow task");
-                        // Đợi Watcher báo Task Auto-Flow này đã hoàn tất
-                        let already_done = core
-                            .store
-                            .get_task_unscoped(&task.id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .is_none_or(|t| t.status.is_terminal());
-                        if !already_done {
+                        // Đợi Watcher báo Task Auto-Flow này thực sự đạt trạng thái terminal
+                        loop {
+                            let already_done = core
+                                .store
+                                .get_task_unscoped(&task.id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_none_or(|t| t.status.is_terminal());
+                            if already_done {
+                                break;
+                            }
                             tokio::select! {
                                 biased;
                                 () = core.shutdown.cancelled() => break,
-                                () = &mut done_notified => {}
+                                () = &mut done_notified => {
+                                    done_notified.set(core.autoflow_done_wake.notified());
+                                    done_notified.as_mut().enable();
+                                }
                                 () = tokio::time::sleep(poll_interval) => {}
                             }
                         }

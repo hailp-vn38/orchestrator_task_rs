@@ -193,7 +193,7 @@ async fn schedule_reminder_and_managed_autoflow() {
 
     let task_cfg = TaskConfig::from_layout(&layout)
         .with_default_scope(TaskScope::new("personal", "homelab"))
-        .with_default_target("wiki", "wiki_root")
+        .with_default_agent("wiki_root")
         .with_runtime(runtime_cfg);
 
     let task_init = TaskManager::prepare(task_cfg).await.unwrap();
@@ -208,7 +208,7 @@ async fn schedule_reminder_and_managed_autoflow() {
         Orchestrator::builder(OrchestratorConfig::new(
             test_llm_config(),
             vec![wiki_agent],
-            layout.wiki_orch_store_dir(),
+            layout.orchestrator_store_dir(),
         ))
         .with_gateway(wiki_gw.clone())
         .build()
@@ -217,11 +217,10 @@ async fn schedule_reminder_and_managed_autoflow() {
     );
 
     let task_mgr = task_init
-        .register_flow("wiki", wiki_orch.clone())
-        .with_wiki_autoflow(WikiAutoFlowBinding::new(
+        .with_orchestrator(wiki_orch.clone())
+        .with_wiki_autoflow(WikiAutoFlowBinding::for_agent(
             engine.clone(),
             autoflow_notify.clone(),
-            "wiki",
             "wiki_root",
         ))
         .start()
@@ -309,7 +308,7 @@ async fn schedule_reminder_and_managed_autoflow() {
 
     let af_task = autoflow_task_created.expect("Auto-Flow should create a first-class Task");
     assert_eq!(af_task.source, TaskSource::Autoflow);
-    assert_eq!(af_task.flow_id, "wiki");
+    assert_eq!(af_task.flow_id, "default");
     assert_eq!(af_task.agent_id, "wiki_root");
     assert!(af_task.prompt.contains(&written.info.scoped_path));
 

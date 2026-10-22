@@ -10,13 +10,15 @@ use serde::{Deserialize, Serialize};
 use crate::error::{TaskError, TaskResult};
 use crate::types::TaskScope;
 
+/// Tên flow mặc định khi hệ thống dùng chung một instance `Orchestrator` duy nhất.
+pub const DEFAULT_FLOW_ID: &str = "default";
+
 /// Bố cục thư mục chuẩn từ một thư mục gốc duy nhất (`workspace_root`) trên Homelab Server.
 ///
 /// Tự động phân bổ đường dẫn nhất quán cho:
 /// - `vault/` (`WikiEngine` Obsidian Vault & `.wiki/index.sqlite`)
 /// - `stores/tasks/` (`tasks.db` & `tasks.owner.lock`)
-/// - `stores/daily_orch/` (`daily_orch` execution & artifact store)
-/// - `stores/wiki_orch/` (`wiki_orch` execution & artifact store)
+/// - `stores/orchestrator/` (`orchestrator.db` duy nhất cho cả `daily_root` & `wiki_root`)
 /// - `prompts/`, `skills/`, `reports/`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceLayout {
@@ -44,12 +46,17 @@ impl WorkspaceLayout {
         self.root_dir.join("stores").join("tasks")
     }
 
-    /// Đường dẫn store cho `daily_orch` Flow 2 (`<root>/stores/daily_orch`).
+    /// Đường dẫn store cho instance `Orchestrator` hợp nhất (`<root>/stores/orchestrator`).
+    pub fn orchestrator_store_dir(&self) -> PathBuf {
+        self.flow_store_dir("orchestrator")
+    }
+
+    /// Đường dẫn store cho `daily_orch` nếu tách riêng (`<root>/stores/daily_orch`).
     pub fn daily_orch_store_dir(&self) -> PathBuf {
         self.flow_store_dir("daily_orch")
     }
 
-    /// Đường dẫn store cho `wiki_orch` Flow 1 (`<root>/stores/wiki_orch`).
+    /// Đường dẫn store cho `wiki_orch` nếu tách riêng (`<root>/stores/wiki_orch`).
     pub fn wiki_orch_store_dir(&self) -> PathBuf {
         self.flow_store_dir("wiki_orch")
     }
@@ -79,8 +86,7 @@ impl WorkspaceLayout {
         for dir in [
             self.wiki_vault_dir(),
             self.tasks_store_dir(),
-            self.daily_orch_store_dir(),
-            self.wiki_orch_store_dir(),
+            self.orchestrator_store_dir(),
             self.prompts_dir(),
             self.skills_dir(),
             self.reports_dir(),
@@ -235,6 +241,12 @@ impl TaskConfig {
         agent_id: impl Into<String>,
     ) -> Self {
         self.default_target = Some(TargetAgent::new(flow_id, agent_id));
+        self
+    }
+
+    /// Đặt Primary Agent mặc định trên instance `Orchestrator` hợp nhất (`flow_id = "default"`).
+    pub fn with_default_agent(mut self, agent_id: impl Into<String>) -> Self {
+        self.default_target = Some(TargetAgent::new(DEFAULT_FLOW_ID, agent_id));
         self
     }
 

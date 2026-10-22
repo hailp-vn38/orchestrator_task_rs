@@ -94,7 +94,15 @@ case "$mode" in
     run clippy cargo clippy --all-targets --quiet "$@" -- -D warnings
     ;;
   run)
-    run run cargo run --quiet "$@"
+    if [ "${CHECK_SILENT_RUN:-0}" = "1" ]; then
+      run run cargo run --quiet "$@"
+      auto_prune
+    else
+      cargo run --quiet "$@"
+      code=$?
+      auto_prune
+      exit "$code"
+    fi
     ;;
   *)
     echo "check: chế độ không hợp lệ '$mode' (dùng: fast | full | test | check | clippy | run | clean)" >&2

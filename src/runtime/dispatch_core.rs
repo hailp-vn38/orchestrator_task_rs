@@ -382,9 +382,7 @@ impl SharedTaskCore {
                 self.event_bus.emit(TaskEvent::TaskTerminal {
                     task: finished.clone(),
                 });
-                if finished.source == TaskSource::Autoflow {
-                    self.autoflow_done_wake.notify_waiters();
-                }
+                self.autoflow_done_wake.notify_waiters();
             }
             return Ok(true);
         }

@@ -22,6 +22,19 @@ pub enum TaskEvent {
         progress_summary: Option<String>,
         timestamp_ms: i64,
     },
+    /// Sự kiện thực thi chi tiết từ `Orchestrator` (`text.delta`, `tool.started`, `tool.completed`, ...)
+    /// gắn kèm `task_id` và `flow_id` để stream trực tiếp lên UI View Task hoặc CLI.
+    TaskExecutionStream {
+        task_id: String,
+        flow_id: String,
+        owner_id: String,
+        workspace_id: String,
+        event_type: String,
+        session_id: String,
+        root_session_id: String,
+        payload: serde_json::Value,
+        timestamp_ms: i64,
+    },
     TaskTerminal {
         task: TaskView,
     },
@@ -47,6 +60,11 @@ impl TaskEvent {
                 task.owner_id == scope.owner_id && task.workspace_id == scope.workspace_id
             }
             Self::TaskProgress {
+                owner_id,
+                workspace_id,
+                ..
+            }
+            | Self::TaskExecutionStream {
                 owner_id,
                 workspace_id,
                 ..

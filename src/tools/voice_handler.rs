@@ -200,14 +200,25 @@ async fn handle_reminder_create(
     };
 
     let created = core.create_schedule_internal(scope, req).await?;
+    let next_run_at_iso = created.next_run_at.and_then(|ms| {
+        let dt = chrono::DateTime::from_timestamp_millis(ms)?;
+        if let Ok(tz) = created.timezone.parse::<chrono_tz::Tz>() {
+            Some(dt.with_timezone(&tz).to_rfc3339())
+        } else {
+            Some(dt.to_rfc3339())
+        }
+    });
     Ok(json!({
         "reminder_id": created.id,
         "schedule_id": created.id,
         "title": created.title,
+        "priority": created.priority.as_str(),
         "action_kind": created.action_kind.as_str(),
         "schedule_kind": created.schedule_kind.as_str(),
         "status": created.status.as_str(),
+        "timezone": created.timezone,
         "next_run_at": created.next_run_at,
+        "next_run_at_iso": next_run_at_iso,
         "related_wiki_links": created.related_wiki_links,
     }))
 }

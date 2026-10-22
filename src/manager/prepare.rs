@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use orchestrator_agent_rs::{HostTool, Orchestrator};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::TaskConfig;
+use crate::config::{TaskConfig, DEFAULT_FLOW_ID};
 use crate::error::{TaskError, TaskResult};
 use crate::manager::{TaskManager, TaskManagerInit};
 use crate::owner_lock::OwnerLock;
@@ -52,6 +52,11 @@ impl TaskManagerInit {
     /// Xuất toàn bộ 8 `HostTool` (`task_*` + `reminder_*`).
     pub fn all_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         build_all_host_tools(Arc::clone(&self.core))
+    }
+
+    /// Gắn một instance `Orchestrator` hợp nhất duy nhất (`flow_id = "default"`).
+    pub fn with_orchestrator(self, orchestrator: Arc<Orchestrator>) -> Self {
+        self.register_flow(DEFAULT_FLOW_ID, orchestrator)
     }
 
     /// Gắn một instance `Orchestrator` với định danh `flow_id` (VD: `"daily"`, `"wiki"`).

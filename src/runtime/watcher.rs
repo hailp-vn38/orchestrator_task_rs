@@ -111,6 +111,18 @@ async fn handle_execution_event(
     task: &TaskView,
     ev: &ExecutionEvent,
 ) -> bool {
+    core.event_bus.emit(TaskEvent::TaskExecutionStream {
+        task_id: task.id.clone(),
+        flow_id: task.flow_id.clone(),
+        owner_id: task.owner_id.clone(),
+        workspace_id: task.workspace_id.clone(),
+        event_type: ev.event_type.clone(),
+        session_id: ev.session_id.clone(),
+        root_session_id: ev.root_session_id.clone(),
+        payload: ev.payload.clone(),
+        timestamp_ms: ev.timestamp_ms,
+    });
+
     match ev.event_type.as_str() {
         "tool.started" => {
             let tool_name = ev
