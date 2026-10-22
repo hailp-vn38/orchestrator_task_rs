@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use llm_wiki::{TreeOptions, TreeScope};
-use orchestrator_task_rs::{CreateTaskRequest, TaskFilter, TaskSource};
+use orchestrator_flow_rs::{CreateTaskRequest, TaskFilter, TaskSource};
 
 use crate::shared::env::ExampleResult;
 use crate::shared::pdf::build_sample_technical_pdf;

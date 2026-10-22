@@ -54,7 +54,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
 
       - name: Check formatting
-        run: cargo +stable fmt --package orchestrator-task -- --check
+        run: cargo +stable fmt --package orchestrator-flow -- --check
 
       - name: Check all targets
         run: cargo +stable check --locked --all-targets

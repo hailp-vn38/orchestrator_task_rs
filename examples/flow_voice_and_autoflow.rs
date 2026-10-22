@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use llm_wiki::{TreeOptions, TreeScope};
-use orchestrator_task_rs::TaskFilter;
+use orchestrator_flow_rs::TaskFilter;
 use serde_json::json;
 
 use crate::shared::env::ExampleResult;

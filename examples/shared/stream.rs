@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use orchestrator_task_rs::{TaskEvent, TaskFeedItem, TaskSource, TaskSubscription, TaskView};
+use orchestrator_flow_rs::{TaskEvent, TaskFeedItem, TaskSource, TaskSubscription, TaskView};
 
 use crate::shared::env::ExampleResult;
 

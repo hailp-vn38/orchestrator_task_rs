@@ -1,4 +1,4 @@
-//! Public value types của `orchestrator_task_rs`, tách theo miền nghiệp vụ.
+//! Public value types của `orchestrator_flow_rs`, tách theo miền nghiệp vụ.
 
 mod event;
 mod execution;

@@ -1,4 +1,4 @@
-//! Typed errors cho `orchestrator_task_rs`.
+//! Typed errors cho `orchestrator_flow_rs`.
 
 use std::fmt;
 

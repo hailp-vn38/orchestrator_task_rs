@@ -1,9 +1,9 @@
-# Tài Liệu API Đầy Đủ — `orchestrator_task_rs` (`orchestrator-task`)
+# Tài Liệu API Đầy Đủ — `orchestrator_flow_rs` (`orchestrator-flow`)
 
-Tài liệu tham chiếu toàn diện cho crate **`orchestrator_task_rs`** (package Cargo: `orchestrator-task` `v0.1.0`) — thư viện Rust quản lý **Task** chạy nền, hàng đợi **Followup**, bộ lập lịch **Schedule / Reminder** (One-shot Timer & Cron), bộ công cụ **Dual-Mode Tools** (Voice Agent Raw JSON & `HostTool`), và cầu nối **Wiki Auto-Flow** trên một hoặc nhiều **Flow** (`Orchestrator`).
+Tài liệu tham chiếu toàn diện cho crate **`orchestrator_flow_rs`** (package Cargo: `orchestrator-flow` `v0.1.0`) — thư viện Rust quản lý **Task** chạy nền, hàng đợi **Followup**, bộ lập lịch **Schedule / Reminder** (One-shot Timer & Cron), bộ công cụ **Dual-Mode Tools** (Voice Agent Raw JSON & `HostTool`), và cầu nối **Wiki Auto-Flow** trên một hoặc nhiều **Flow** (`Orchestrator`).
 
-- **Package Cargo**: `orchestrator-task`
-- **Tên crate khi import trong Rust**: `orchestrator_task_rs`
+- **Package Cargo**: `orchestrator-flow`
+- **Tên crate khi import trong Rust**: `orchestrator_flow_rs`
 - **Rust Edition / MSRV**: Edition 2021, Rust $\ge 1.89$
 - **Async Runtime**: Tokio (`rt`, `sync`, `time`, `fs`)
 - **Lưu trữ**: SQLite độc lập (`tasks.db` ở chế độ WAL) kèm khóa tiến trình độc quyền (`tasks.owner.lock`) theo [ADR-0001](adr/0001-separate-task-sqlite-store.md)
@@ -36,7 +36,7 @@ flowchart TB
         UI["Task View UI (SSE / WebSocket / REST)"]
     end
 
-    subgraph TaskCrate["orchestrator_task_rs (Deep Module)"]
+    subgraph TaskCrate["orchestrator_flow_rs (Deep Module)"]
         TM["TaskManager"]
         TS["TaskToolSuite"]
         SC["Scheduler Worker (Cron & Timer)"]
@@ -72,7 +72,7 @@ flowchart TB
 Toàn bộ kiểu dữ liệu và hàm public được re-export trực tiếp tại gốc crate [`src/lib.rs`](../src/lib.rs):
 
 ```rust
-use orchestrator_task_rs::{
+use orchestrator_flow_rs::{
     // Hằng số mặc định
     DEFAULT_FLOW_ID, DEFAULT_OWNER_ID, DEFAULT_WORKSPACE_ID,
 
@@ -1347,7 +1347,7 @@ pub enum ErrorCode {
 use std::sync::Arc;
 use llm_wiki::WikiEngine;
 use orchestrator_agent_rs::Orchestrator;
-use orchestrator_task_rs::{
+use orchestrator_flow_rs::{
     CreateScheduleRequest, CreateTaskRequest, TaskConfig, TaskEvent, TaskFeedItem,
     TaskFilter, TaskManager, TaskResult, TaskSource, WikiAutoFlowBinding, WorkspaceLayout,
 };

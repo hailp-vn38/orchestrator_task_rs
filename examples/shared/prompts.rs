@@ -4,11 +4,11 @@
 use std::path::Path;
 
 use llm_wiki::{SOURCE_COLLECTOR_PROMPT, WIKI_CURATOR_PROMPT, WIKI_INGESTOR_PROMPT};
-use orchestrator_task_rs::WorkspaceLayout;
+use orchestrator_flow_rs::WorkspaceLayout;
 
 use crate::shared::env::ExampleResult;
 
-pub const WIKI_ROOT_PROMPT: &str = r#"You are `wiki_root` — the Root Subagent Dispatcher for Flow 1 (Background Karpathy LLM Wiki Pipeline) managed by `orchestrator_task_rs`.
+pub const WIKI_ROOT_PROMPT: &str = r#"You are `wiki_root` — the Root Subagent Dispatcher for Flow 1 (Background Karpathy LLM Wiki Pipeline) managed by `orchestrator_flow_rs`.
 
 ## Strict Architectural Constraint
 - You DO NOT execute domain tasks directly. You only have the `subagent` tool.
@@ -124,7 +124,7 @@ pub fn write_prompts_and_skills(layout: &WorkspaceLayout) -> ExampleResult<()> {
     std::fs::write(prompts.join("report_stager.md"), REPORT_STAGER_PROMPT)?;
     std::fs::write(prompts.join("reminder_planner.md"), REMINDER_PLANNER_PROMPT)?;
 
-    // Flow 1 prompts (tích hợp Managed Auto-Flow của orchestrator_task_rs + subagents của llm-wiki-rs)
+    // Flow 1 prompts (tích hợp Managed Auto-Flow của orchestrator_flow_rs + subagents của llm-wiki-rs)
     std::fs::write(prompts.join("wiki_root.md"), WIKI_ROOT_PROMPT)?;
     std::fs::write(prompts.join("source_collector.md"), SOURCE_COLLECTOR_PROMPT)?;
     std::fs::write(prompts.join("wiki_ingestor.md"), WIKI_INGESTOR_PROMPT)?;

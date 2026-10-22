@@ -1,4 +1,4 @@
-//! Module dùng chung cho các example của `orchestrator_task_rs`.
+//! Module dùng chung cho các example của `orchestrator_flow_rs`.
 //! Tất cả các example cùng trỏ về 1 thư mục `target/homelab_shared_workspace`
 //! (qua `WorkspaceLayout`) và dùng chung bộ hiển thị stream sự kiện trực tiếp.
 

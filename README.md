@@ -1,6 +1,6 @@
-# orchestrator-task
+# orchestrator-flow
 
-Thư viện Rust quản lý **Task**, **Followup**, **Schedule/Reminder** và **Wiki Auto-Flow** trên nhiều Flow của hệ thống Orchestrator. Tên package Cargo là `orchestrator-task`; tên crate dùng trong Rust là `orchestrator_task_rs`.
+Thư viện Rust quản lý **Task**, **Followup**, **Schedule/Reminder** và **Wiki Auto-Flow** trên nhiều Flow của hệ thống Orchestrator. Tên package Cargo là `orchestrator-flow`; tên crate dùng trong Rust là `orchestrator_flow_rs`.
 
 Thư viện được nhúng vào host chạy Tokio; repository hiện không cung cấp chương trình CLI hay server độc lập.
 
@@ -43,7 +43,7 @@ Host có thể thêm thư viện bằng dependency cục bộ:
 
 ```toml
 [dependencies]
-orchestrator-task = { path = "../orchestrator_task_rs" }
+orchestrator-flow = { path = "../orchestrator_task_rs" }
 ```
 
 ## Tích hợp vào host
@@ -60,7 +60,7 @@ Ví dụ phần ghép nối, với `daily_orch` do host build sau khi đăng ký
 ```rust,no_run
 use std::sync::Arc;
 use orchestrator_agent_rs::Orchestrator;
-use orchestrator_task_rs::{TaskConfig, TaskManager, TaskManagerInit, TaskResult};
+use orchestrator_flow_rs::{TaskConfig, TaskManager, TaskManagerInit, TaskResult};
 
 async fn prepare_tasks() -> TaskResult<TaskManagerInit> {
     let config = TaskConfig::new("./data/tasks")
@@ -89,14 +89,14 @@ Bộ tools điều phối gồm `task_create`, `task_followup`, `task_list`, `ta
 Chạy từ thư mục repository:
 
 ```sh
-cargo +stable fmt --package orchestrator-task -- --check
+cargo +stable fmt --package orchestrator-flow -- --check
 cargo +stable check --locked --all-targets
 cargo +stable clippy --locked --all-targets -- -D warnings
 cargo +stable test --locked --all-targets
 cargo +stable test --locked --doc
 ```
 
-Dùng `fmt --package orchestrator-task` để chỉ kiểm tra định dạng package này, tránh kiểm tra cả source của các path dependency. Các lệnh trên không xác nhận tích hợp với provider LLM hoặc host thực tế.
+Dùng `fmt --package orchestrator-flow` để chỉ kiểm tra định dạng package này, tránh kiểm tra cả source của các path dependency. Các lệnh trên không xác nhận tích hợp với provider LLM hoặc host thực tế.
 
 ## CI trên GitHub
 

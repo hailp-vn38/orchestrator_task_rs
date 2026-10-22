@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use orchestrator_task_rs::WorkspaceLayout;
+use orchestrator_flow_rs::WorkspaceLayout;
 
 pub type ExampleResult<T> = Result<T, Box<dyn std::error::Error>>;
 

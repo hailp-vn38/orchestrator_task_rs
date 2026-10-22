@@ -1,4 +1,4 @@
-# Đặc tả Kiến trúc Hợp nhất: `orchestrator_task_rs` + Dual-Flow (`wiki_orch` & `daily_orch`) + Voice Agent
+# Đặc tả Kiến trúc Hợp nhất: `orchestrator_flow_rs` + Dual-Flow (`wiki_orch` & `daily_orch`) + Voice Agent
 
 **Tài liệu kết hợp từ:**
 - Phiên thiết kế Dual-Flow: [dual-flow-agent-architecture.md](file:///Users/lamphuchai/Desktop/project_rust/llm-wiki-rs/docs/dual-flow-agent-architecture.md) ([d571f046](conversation://d571f046-40f4-491d-a91c-a4304d7cc129))
@@ -18,7 +18,7 @@ Trong kiến trúc Dual-Flow:
 Tách quá trình khởi tạo thành 2 pha rõ ràng với cấu hình thuần dữ liệu (`TaskConfig` + `TaskRuntimeConfig`), tuân thủ đúng triết lý của [`OrchestratorConfig`](file:///Users/lamphuchai/Desktop/project_rust/orchestrator_agent_rs/src/config.rs#L14-L27):
 
 ```rust
-/// Cấu hình tĩnh của `orchestrator_task_rs` (validate cục bộ, không chứa runtime handle).
+/// Cấu hình tĩnh của `orchestrator_flow_rs` (validate cục bộ, không chứa runtime handle).
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
     /// Thư mục chứa `tasks.db` và `tasks.owner.lock` (tách biệt với store_dir của Orchestrator).

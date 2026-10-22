@@ -1,4 +1,4 @@
-//! `orchestrator_task_rs` — Thư viện quản lý **Task** chạy nền, hàng đợi **Followup**,
+//! `orchestrator_flow_rs` — Thư viện quản lý **Task** chạy nền, hàng đợi **Followup**,
 //! lịch hẹn **Schedule / Reminder** (One-shot Timer & Cron), bộ công cụ **Dual-Mode Tools**
 //! (Voice Agent Raw JSON & `HostTool`) và cầu nối **Wiki Auto-Flow** cho hệ thống Đa Agent (`Orchestrator`).
 //!
@@ -20,7 +20,7 @@
 //! ```rust,no_run
 //! use std::sync::Arc;
 //! use orchestrator_agent_rs::Orchestrator;
-//! use orchestrator_task_rs::{
+//! use orchestrator_flow_rs::{
 //!     CreateTaskRequest, TaskConfig, TaskManager, TaskResult, WorkspaceLayout,
 //! };
 //!

@@ -11,7 +11,7 @@ use orchestrator_agent_rs::{
     AgentDefinition, AgentMode, LlmBackend, LlmConfig, LlmProviderConfig, Orchestrator,
     OrchestratorConfig, ProviderAuth, SecretString,
 };
-use orchestrator_task_rs::{
+use orchestrator_flow_rs::{
     build_sample_technical_pdf, CreateScheduleRequest, CreateTaskRequest, Priority,
     ScheduleActionKind, ScheduleFilter, TaskConfig, TaskEvent, TaskFeedItem, TaskFilter,
     TaskManager, TaskRuntimeConfig, TaskScope, TaskSource, TaskStatus, WikiAutoFlowBinding,
@@ -302,7 +302,7 @@ async fn schedule_reminder_and_managed_autoflow() {
             notes: Some("Xem lại phần drawdown".to_string()),
             action_kind: ScheduleActionKind::NotifyOnly,
             target_agent: None,
-            session_mode: orchestrator_task_rs::ScheduleSessionMode::NewSession,
+            session_mode: orchestrator_flow_rs::ScheduleSessionMode::NewSession,
             priority: Priority::High,
             related_wiki_links: vec!["[[wiki/syntheses/dca]]".to_string()],
             due_at_iso: None,

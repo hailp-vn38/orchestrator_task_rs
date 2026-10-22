@@ -1,4 +1,4 @@
-//! Cấu hình tĩnh cho `orchestrator_task_rs` (ADR-0002).
+//! Cấu hình tĩnh cho `orchestrator_flow_rs` (ADR-0002).
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

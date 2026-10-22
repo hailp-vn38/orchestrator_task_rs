@@ -11,7 +11,7 @@ use orchestrator_agent_rs::{
     AgentDefinition, AgentMode, LlmBackend, LlmConfig, LlmProviderConfig, Orchestrator,
     OrchestratorConfig, ProviderAuth, SecretString,
 };
-use orchestrator_task_rs::{
+use orchestrator_flow_rs::{
     SharedPdfState, TaskConfig, TaskManager, TaskRuntimeConfig, WikiAutoFlowBinding,
     WorkspaceLayout, WorkspaceToolKit, YoutubeCollectorEnv,
 };

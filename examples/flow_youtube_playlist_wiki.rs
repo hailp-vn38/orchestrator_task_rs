@@ -1,4 +1,4 @@
-//! Example 3: Luồng nạp URL YouTube Playlist bằng `orchestrator_task_rs` (`TaskManager` + `WikiAutoFlowBinding`).
+//! Example 3: Luồng nạp URL YouTube Playlist bằng `orchestrator_flow_rs` (`TaskManager` + `WikiAutoFlowBinding`).
 //!
 //! Quy trình thực thi tự động qua hệ thống Quản lý Task nền:
 //! 1. **Tạo Task Thu thập Playlist (`task_create` -> `wiki_root` -> `source_collector`)**:
@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use llm_wiki::{TreeOptions, TreeScope};
-use orchestrator_task_rs::TaskFilter;
+use orchestrator_flow_rs::TaskFilter;
 use serde_json::json;
 
 use crate::shared::env::ExampleResult;
@@ -112,7 +112,7 @@ async fn main() -> ExampleResult<()> {
     let app = HomelabExampleApp::boot_with_options(cli.boot).await?;
     let suite = app.task_mgr.voice_tool_suite();
 
-    println!("\n=== [1. Cấu hình Luồng YouTube Playlist -> Wiki (`orchestrator_task_rs`)] ===");
+    println!("\n=== [1. Cấu hình Luồng YouTube Playlist -> Wiki (`orchestrator_flow_rs`)] ===");
     println!("  • Playlist URL : {}", cli.playlist_url);
     println!("  • Ngôn ngữ sub : {langs_label}");
     println!("  • Giới hạn     : {limit_label} video");

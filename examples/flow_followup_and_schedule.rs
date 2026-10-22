@@ -12,7 +12,7 @@ mod shared;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use orchestrator_task_rs::{
+use orchestrator_flow_rs::{
     CreateScheduleRequest, CreateTaskRequest, Priority, ScheduleActionKind, ScheduleFilter,
     ScheduleSessionMode, TaskFilter, TaskSource,
 };
