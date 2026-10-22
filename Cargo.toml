@@ -1,10 +1,18 @@
 [package]
 name = "orchestrator-flow"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.89"
 description = "Background Task, Followup, Reminder/Cron Scheduler and Wiki Auto-Flow Manager for multi-Orchestrator hosts"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/hailp-vn38/orchestrator_task_rs"
+homepage = "https://github.com/hailp-vn38/orchestrator_task_rs"
+documentation = "https://docs.rs/orchestrator-flow"
+readme = "README.md"
+keywords = ["orchestrator", "agent", "task", "scheduler", "wiki"]
+categories = ["asynchronous", "development-tools"]
+build = "build.rs"
+exclude = ["docs/", ".agents/", ".github/", ".cargo/", "scripts/", ".env*", "AGENTS.md", "CONTEXT.md"]
 
 [lib]
 name = "orchestrator_flow_rs"
@@ -16,9 +24,9 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.15"
-llm-wiki-rs = { path = "../llm-wiki-rs" }
+llm-wiki-rs = { version = "0.1.2", path = "../llm-wiki-rs" }
 lopdf = "0.45"
-orchestrator-agent = { path = "../orchestrator_agent_rs" }
+orchestrator-agent = { version = "0.4.1", path = "../orchestrator_agent_rs" }
 pdf-inspector = "1.25"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -29,6 +37,6 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-orchestrator-agent = { path = "../orchestrator_agent_rs", features = ["test-support"] }
+orchestrator-agent = { version = "0.4.1", path = "../orchestrator_agent_rs", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "test-util"] }

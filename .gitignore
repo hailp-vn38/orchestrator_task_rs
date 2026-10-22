@@ -13,4 +13,5 @@
 *.sqlite-wal
 *.sqlite-shm
 /.env.live
+/.agents/
 *.pdf
