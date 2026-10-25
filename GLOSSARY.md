@@ -35,3 +35,6 @@ _Avoid_: Sync, Background Loop, Daemon
 **Scope**:
 The `(owner_id, workspace_id)` identity pair that isolates Tasks and Schedules (defaulting to `("personal", "homelab")` on the personal homelab server).
 _Avoid_: Tenant, Account, Namespace
+
+**Task Artifact**:
+An immutable, SHA-256 verified file (`Report`, `Image`, `Audio`/TTS, `Document`, `Data`, or `Other`) produced by a Root Agent or Subagent tool (`markdown_create`, `image_create`, `tts_synthesize`, `artifact_create`) within a Task's session family and exposed via `TaskDetailView.artifacts` and `TaskManager::open_task_artifact*`.

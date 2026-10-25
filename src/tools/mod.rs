@@ -15,6 +15,7 @@ use crate::types::{AgentCatalogEntry, TaskScope};
 pub(crate) mod catalog;
 pub(crate) mod host_adapter;
 pub mod markdown_report;
+pub mod media_artifacts;
 pub mod pdf;
 pub mod toolkit;
 pub(crate) mod voice_handler;
@@ -23,6 +24,12 @@ pub mod wiki_bridge;
 pub mod youtube;
 
 pub use markdown_report::{report_host_tools, MarkdownCreateTool, MarkdownReadTool};
+pub use media_artifacts::{
+    media_host_tools, ArtifactCreateTool, DefaultImageGeneratorBackend,
+    DefaultTtsSynthesizerBackend, GeneratedImagePayload, ImageCreateTool, ImageGenerationRequest,
+    ImageGeneratorBackend, SynthesizedAudioPayload, TtsSynthesisRequest, TtsSynthesizeTool,
+    TtsSynthesizerBackend,
+};
 pub use pdf::{
     build_sample_technical_pdf, convert_document_with_anydoc, pdf_host_tools, AnydocInspectPdfTool,
     AnydocSaveToSourcesTool, ConvertedPdfDoc, SharedPdfState,

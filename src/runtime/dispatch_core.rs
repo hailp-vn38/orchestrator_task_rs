@@ -11,8 +11,9 @@ use crate::runtime::{compute_next_cron_ms, lock, parse_due_at_ms, watcher, Share
 use crate::store::{new_id, now_ms, NewScheduleRow, NewTaskRow, TerminalUpdate};
 use crate::types::{
     CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView, ScheduleActionKind,
-    ScheduleKind, ScheduleStatus, ScheduleView, TaskAgentMessageView, TaskDetailView, TaskEvent,
-    TaskScope, TaskSource, TaskStatus, TaskView, WikiDeleteOutcome,
+    ScheduleKind, ScheduleStatus, ScheduleView, TaskAgentMessageView, TaskArtifactDownload,
+    TaskArtifactKind, TaskArtifactRole, TaskArtifactView, TaskDetailView, TaskEvent, TaskScope,
+    TaskSource, TaskStatus, TaskView, WikiDeleteOutcome,
 };
 
 impl SharedTaskCore {
@@ -535,7 +536,7 @@ impl SharedTaskCore {
         Ok(false)
     }
 
-    /// Lấy chi tiết đầy đủ của một Task kèm `FamilySnapshot` và các view thực thi của Root + Subagent.
+    /// Lấy chi tiết đầy đủ của một Task kèm `FamilySnapshot`, danh sách `artifacts` và các view thực thi của Root + Subagent.
     pub(crate) async fn get_task_detail_internal(
         &self,
         scope: &TaskScope,
@@ -545,14 +546,102 @@ impl SharedTaskCore {
         let task = self.store.get_task(scope, task_id).await?;
         let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
         let followups = self.store.list_followups(&task.id).await?;
-        let family_snapshot = if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
+        let (family_snapshot, artifacts) = if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
             let caller = task_scope.to_caller_context();
-            orch.snapshot(&caller, &task.session_id).await.ok()
+            let snap = orch.snapshot(&caller, &task.session_id).await.ok();
+            let arts = orch
+                .list_family_artifacts(&caller, &task.session_id)
+                .await
+                .unwrap_or_default()
+                .iter()
+                .map(|fa| TaskArtifactView::from_family_artifact(&task.id, fa))
+                .collect();
+            (snap, arts)
         } else {
-            None
+            (None, Vec::new())
         };
 
-        Ok(TaskDetailView::from_parts(task, followups, family_snapshot))
+        Ok(TaskDetailView::from_parts_with_artifacts(
+            task,
+            followups,
+            family_snapshot,
+            artifacts,
+        ))
+    }
+
+    /// Liệt kê toàn bộ các Artifact đã commit thuộc về một Task (gồm cả Root Agent và các Subagent con).
+    pub(crate) async fn list_task_artifacts_internal(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+    ) -> TaskResult<Vec<TaskArtifactView>> {
+        self.ensure_open()?;
+        let task = self.store.get_task(scope, task_id).await?;
+        let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
+        let orch = self.flows()?.get_flow(&task.flow_id)?;
+        let caller = task_scope.to_caller_context();
+        let family_artifacts = orch
+            .list_family_artifacts(&caller, &task.session_id)
+            .await?;
+        Ok(family_artifacts
+            .iter()
+            .map(|fa| TaskArtifactView::from_family_artifact(&task.id, fa))
+            .collect())
+    }
+
+    /// Mở một Artifact thuộc về một Task để đọc/stream kèm xác minh toàn vẹn SHA-256.
+    pub(crate) async fn open_task_artifact_internal(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> TaskResult<TaskArtifactDownload> {
+        self.ensure_open()?;
+        let trimmed_art_id = artifact_id.trim();
+        if trimmed_art_id.is_empty() {
+            return Err(TaskError::invalid_input("artifact_id must not be empty"));
+        }
+        let task = self.store.get_task(scope, task_id).await?;
+        let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
+        let orch = self.flows()?.get_flow(&task.flow_id)?;
+        let caller = task_scope.to_caller_context();
+
+        let family_artifacts = orch
+            .list_family_artifacts(&caller, &task.session_id)
+            .await?;
+        let download = orch
+            .open_family_artifact(&caller, &task.session_id, trimmed_art_id)
+            .await?;
+
+        let metadata = family_artifacts
+            .iter()
+            .find(|fa| fa.artifact.id == download.artifact.id)
+            .map(|fa| TaskArtifactView::from_family_artifact(&task.id, fa))
+            .unwrap_or_else(|| TaskArtifactView {
+                id: download.artifact.id.clone(),
+                task_id: task.id.clone(),
+                root_session_id: task.session_id.clone(),
+                producer_session_id: task.session_id.clone(),
+                producer_agent_id: task.agent_id.clone(),
+                turn_id: task.latest_turn_id.clone().unwrap_or_default(),
+                producer_invocation_id: None,
+                producer_tool_name: None,
+                name: download.artifact.name.clone(),
+                mime_type: download.artifact.mime_type.clone(),
+                kind: TaskArtifactKind::from_mime_and_name(
+                    &download.artifact.mime_type,
+                    &download.artifact.name,
+                ),
+                role: TaskArtifactRole::from_agent_role(download.artifact.role),
+                size_bytes: download.artifact.size_bytes,
+                sha256: download.artifact.sha256.clone(),
+                created_at: task.updated_at,
+            });
+
+        Ok(TaskArtifactDownload {
+            metadata,
+            reader: download.into_reader(),
+        })
     }
 
     /// Lấy lịch sử tin nhắn (`user`, `assistant`, `tool`) của Root Agent hoặc một Subagent cụ thể trong Task.

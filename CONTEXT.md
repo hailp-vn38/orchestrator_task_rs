@@ -68,6 +68,9 @@ Liên kết tài liệu theo ký hiệu `[[...]]`, dùng để nối các trang 
 **Standalone Report**:
 Báo cáo Markdown được xuất riêng để phục vụ người dùng. Việc xuất báo cáo không đồng nghĩa với việc đưa nội dung vào Source hoặc biên soạn thành Wiki Page.
 
+**Task Artifact**:
+Sản phẩm đầu ra bất biến đa định dạng (`Report`, `Image`, `Audio`/TTS, `Document`, `Data`, `Other`) được xuất bản bởi Root Agent hoặc Subagent thông qua các công cụ (`markdown_create`, `image_create`, `tts_synthesize`, `artifact_create`), lưu trữ trong `ArtifactStore` gắn với session family của Task và được xác minh toàn vẹn bằng SHA-256 khi đọc.
+
 **Auto-Flow**:
 Quá trình phát hiện Source chưa được nạp vào Wiki hoặc vấn đề cấu trúc tri thức, rồi khởi tạo Task trên Wiki Flow để xử lý. Mỗi lượt Auto-Flow được quản lý như một Task có thể theo dõi và hủy, theo [ADR-0003](docs/adr/0003-managed-autoflow-as-first-class-tasks.md).
 _Avoid_: Sync, Background Loop, Daemon

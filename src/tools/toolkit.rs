@@ -12,6 +12,10 @@ use tokio::sync::Notify;
 use crate::config::WorkspaceLayout;
 use crate::manager::TaskManagerInit;
 use crate::tools::markdown_report::report_host_tools;
+use crate::tools::media_artifacts::{
+    media_host_tools, DefaultImageGeneratorBackend, DefaultTtsSynthesizerBackend,
+    ImageGeneratorBackend, TtsSynthesizerBackend,
+};
 use crate::tools::pdf::{pdf_host_tools, SharedPdfState};
 use crate::tools::web::{web_host_tools, HtmlWorkspace};
 use crate::tools::wiki_bridge::{
@@ -32,6 +36,8 @@ pub struct WorkspaceToolKit {
     pub pdf_state: Arc<SharedPdfState>,
     pub yt_env: Arc<YoutubeCollectorEnv>,
     pub html_workspace: Arc<HtmlWorkspace>,
+    pub image_backend: Arc<dyn ImageGeneratorBackend>,
+    pub tts_backend: Arc<dyn TtsSynthesizerBackend>,
 }
 
 impl WorkspaceToolKit {
@@ -92,7 +98,21 @@ impl WorkspaceToolKit {
             pdf_state,
             yt_env,
             html_workspace,
+            image_backend: Arc::new(DefaultImageGeneratorBackend),
+            tts_backend: Arc::new(DefaultTtsSynthesizerBackend),
         }
+    }
+
+    /// Tùy chỉnh `ImageGeneratorBackend` cho công cụ `image_create`.
+    pub fn with_image_backend(mut self, backend: Arc<dyn ImageGeneratorBackend>) -> Self {
+        self.image_backend = backend;
+        self
+    }
+
+    /// Tùy chỉnh `TtsSynthesizerBackend` cho công cụ `tts_synthesize`.
+    pub fn with_tts_backend(mut self, backend: Arc<dyn TtsSynthesizerBackend>) -> Self {
+        self.tts_backend = backend;
+        self
     }
 
     /// Tùy chỉnh thư mục lưu cache HTML nguyên bản cho `HtmlWorkspace`.
@@ -162,6 +182,15 @@ impl WorkspaceToolKit {
         report_host_tools(self.reports_dir.clone())
     }
 
+    /// Xuất bộ 3 `HostTool` đa phương tiện & đa định dạng (`image_create`, `tts_synthesize`, `artifact_create`).
+    pub fn media_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
+        media_host_tools(
+            Arc::clone(&self.image_backend),
+            Arc::clone(&self.tts_backend),
+            Some(self.reports_dir.clone()),
+        )
+    }
+
     /// Xuất cặp `HostTool` `[yt_list_playlist, yt_fetch_transcript]`.
     pub fn youtube_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         youtube_host_tools(Arc::clone(&self.yt_env))
@@ -189,12 +218,13 @@ impl WorkspaceToolKit {
 
     /// Xuất bộ `HostTool` chuẩn cho **Flow 2 (`daily_orch`)** khi tách riêng 2 instance `Orchestrator`:
     /// gồm `wiki_readonly_host_tools()`, `web_host_tools()`, `add_to_sources`, `markdown_create`, `markdown_read`,
-    /// và 4 tool `reminder_*` từ `TaskManagerInit`.
+    /// `image_create`, `tts_synthesize`, `artifact_create`, và 4 tool `reminder_*` từ `TaskManagerInit`.
     pub fn daily_flow_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>> {
         let mut tools = self.wiki_readonly_host_tools();
         tools.extend(self.web_host_tools());
         tools.push(self.add_to_sources_host_tool());
         tools.extend(self.report_host_tools());
+        tools.extend(self.media_host_tools());
         tools.extend(init.reminder_host_tools());
         tools
     }
@@ -208,11 +238,13 @@ impl WorkspaceToolKit {
     }
 
     /// Xuất toàn bộ `HostTool` chuẩn cho **1 instance `Orchestrator` hợp nhất** (chứa cả `daily_root` và `wiki_root`):
-    /// gồm `anydoc_*`, `yt_*`, `fetch_html`/`html_*`, `add_to_sources`, `markdown_*`, `reminder_*` và 14 tool `wiki_*`.
+    /// gồm `anydoc_*`, `yt_*`, `fetch_html`/`html_*`, `add_to_sources`, `markdown_*`, `image_create`,
+    /// `tts_synthesize`, `artifact_create`, `reminder_*` và 14 tool `wiki_*`.
     pub fn all_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>> {
         let mut tools = self.collector_host_tools();
         tools.push(self.add_to_sources_host_tool());
         tools.extend(self.report_host_tools());
+        tools.extend(self.media_host_tools());
         tools.extend(init.reminder_host_tools());
         tools.extend(self.wiki_host_tools());
         tools
@@ -224,6 +256,7 @@ impl WorkspaceToolKit {
         let mut tools = self.collector_host_tools();
         tools.push(self.add_to_sources_host_tool());
         tools.extend(self.report_host_tools());
+        tools.extend(self.media_host_tools());
         tools.extend(init.all_host_tools());
         tools.extend(self.wiki_host_tools());
         tools

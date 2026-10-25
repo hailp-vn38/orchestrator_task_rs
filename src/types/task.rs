@@ -4,6 +4,7 @@ use orchestrator_agent_rs::{FamilySnapshot, RunStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::config::TargetAgent;
+use crate::types::artifact::TaskArtifactView;
 use crate::types::execution::{TaskAgentSessionView, TaskExecutionSummary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,12 +201,13 @@ pub struct FollowupView {
 }
 
 /// Chi tiết đầy đủ của 1 Task trên UI View Task (gồm bản ghi Task, danh sách Followup,
-/// tổng hợp số liệu `execution_summary`, chi tiết phiên của `root_agent` + `subagents`,
-/// và `FamilySnapshot` gốc từ `Orchestrator`).
+/// danh sách `artifacts` đa định dạng, tổng hợp số liệu `execution_summary`, chi tiết phiên
+/// của `root_agent` + `subagents`, và `FamilySnapshot` gốc từ `Orchestrator`).
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDetailView {
     pub task: TaskView,
     pub followups: Vec<FollowupView>,
+    pub artifacts: Vec<TaskArtifactView>,
     pub execution_summary: Option<TaskExecutionSummary>,
     pub root_agent: Option<TaskAgentSessionView>,
     pub subagents: Vec<TaskAgentSessionView>,
@@ -219,9 +221,19 @@ impl TaskDetailView {
         followups: Vec<FollowupView>,
         family_snapshot: Option<FamilySnapshot>,
     ) -> Self {
+        Self::from_parts_with_artifacts(task, followups, family_snapshot, Vec::new())
+    }
+
+    pub fn from_parts_with_artifacts(
+        task: TaskView,
+        followups: Vec<FollowupView>,
+        family_snapshot: Option<FamilySnapshot>,
+        artifacts: Vec<TaskArtifactView>,
+    ) -> Self {
         let (execution_summary, root_agent, subagents) = match family_snapshot {
             Some(ref snap) => {
-                let summary = TaskExecutionSummary::from_family_snapshot(snap);
+                let mut summary = TaskExecutionSummary::from_family_snapshot(snap);
+                summary.apply_artifacts(&artifacts);
                 let root = TaskAgentSessionView::from_session_snapshot(&snap.root);
                 let children = snap
                     .children
@@ -236,6 +248,7 @@ impl TaskDetailView {
         Self {
             task,
             followups,
+            artifacts,
             execution_summary,
             root_agent,
             subagents,

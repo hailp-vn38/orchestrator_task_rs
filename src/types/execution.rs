@@ -8,6 +8,8 @@ use orchestrator_agent_rs::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::types::artifact::{TaskArtifactKind, TaskArtifactRole, TaskArtifactView};
+
 /// Tổng hợp số liệu thực thi của toàn bộ cây Agent (Root + các Subagent) trong một Task.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskExecutionSummary {
@@ -37,6 +39,18 @@ pub struct TaskExecutionSummary {
     pub sources_written: Vec<String>,
     /// Danh sách đường dẫn `Wiki Page` (`wiki/...`) đã được tạo hoặc cập nhật thành công trong Task.
     pub wiki_pages_written: Vec<String>,
+    /// Tổng số Task Artifacts đã xuất bản trong Task (gồm cả `primary` và `intermediate`).
+    pub total_artifacts: usize,
+    /// Số lượng Task Artifacts có vai trò `primary`.
+    pub primary_artifacts: usize,
+    /// Số lượng Task Artifacts thuộc phân loại `report` (`text/markdown`, `text/plain`, `text/html`).
+    pub report_artifacts: usize,
+    /// Số lượng Task Artifacts thuộc phân loại `image` (`image/*`).
+    pub image_artifacts: usize,
+    /// Số lượng Task Artifacts thuộc phân loại `audio` / TTS (`audio/*`).
+    pub audio_artifacts: usize,
+    /// Danh sách các `artifact_id` đã xuất bản trong Task (khử trùng lặp).
+    pub artifact_ids: Vec<String>,
     /// Kết quả `is_healthy` của lần kiểm toán `wiki_lint` gần nhất trong Task (nếu có).
     pub last_lint_healthy: Option<bool>,
     /// `true` nếu danh sách Subagent con vượt trần snapshot của `Orchestrator`.
@@ -125,6 +139,44 @@ impl TaskExecutionSummary {
 
         if let Some(healthy) = meta.get("is_healthy").and_then(Value::as_bool) {
             self.last_lint_healthy = Some(healthy);
+        }
+
+        if let Some(art_id) = meta.get("artifact_id").and_then(Value::as_str) {
+            push_unique(&mut self.artifact_ids, art_id);
+        }
+        if let Some(arr) = meta.get("artifact_ids").and_then(Value::as_array) {
+            for item in arr {
+                if let Some(id_str) = item.as_str() {
+                    push_unique(&mut self.artifact_ids, id_str);
+                }
+            }
+        }
+    }
+
+    /// Cập nhật thống kê artifacts từ danh sách `TaskArtifactView` đã commit trong `ArtifactStore`.
+    pub fn apply_artifacts(&mut self, artifacts: &[TaskArtifactView]) {
+        self.total_artifacts = artifacts.len();
+        self.primary_artifacts = 0;
+        self.report_artifacts = 0;
+        self.image_artifacts = 0;
+        self.audio_artifacts = 0;
+        for art in artifacts {
+            push_unique(&mut self.artifact_ids, &art.id);
+            if art.role == TaskArtifactRole::Primary {
+                self.primary_artifacts = self.primary_artifacts.saturating_add(1);
+            }
+            match art.kind {
+                TaskArtifactKind::Report => {
+                    self.report_artifacts = self.report_artifacts.saturating_add(1);
+                }
+                TaskArtifactKind::Image => {
+                    self.image_artifacts = self.image_artifacts.saturating_add(1);
+                }
+                TaskArtifactKind::Audio => {
+                    self.audio_artifacts = self.audio_artifacts.saturating_add(1);
+                }
+                _ => {}
+            }
         }
     }
 

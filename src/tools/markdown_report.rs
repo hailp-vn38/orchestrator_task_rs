@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use llm_wiki::slugify;
 use orchestrator_agent_rs::{
-    HostTool, ToolContext, ToolDescriptor, ToolEffect, ToolError, ToolOutcome,
+    ArtifactInput, HostTool, ToolContext, ToolDescriptor, ToolEffect, ToolError, ToolOutcome,
 };
 use serde_json::{json, Value};
 
@@ -85,13 +85,31 @@ impl HostTool for MarkdownCreateTool {
         std::fs::write(&full_path, &content)
             .map_err(|e| host_tool_err("IO_ERROR", e.to_string()))?;
 
+        let artifact = ctx
+            .artifacts()
+            .put(ArtifactInput::primary_bytes(
+                &safe_name,
+                "text/markdown; charset=utf-8",
+                content.as_bytes().to_vec(),
+            ))
+            .await?;
+
         Ok(host_tool_outcome(
             &ctx,
-            format!("Saved report to {}", full_path.display()),
+            format!(
+                "Saved report to {} (artifact_id={})",
+                full_path.display(),
+                artifact.id
+            ),
             json!({
                 "filename": safe_name,
                 "path": full_path.display().to_string(),
-                "bytes": content.len()
+                "bytes": content.len(),
+                "artifact_id": artifact.id,
+                "artifact_ids": [artifact.id],
+                "artifact_kind": "report",
+                "mime_type": artifact.mime_type,
+                "sha256": artifact.sha256
             }),
         ))
     }

@@ -1,11 +1,13 @@
 //! Public value types của `orchestrator_flow_rs`, tách theo miền nghiệp vụ.
 
+mod artifact;
 mod event;
 mod execution;
 mod schedule;
 mod scope;
 mod task;
 
+pub use artifact::{TaskArtifactDownload, TaskArtifactKind, TaskArtifactRole, TaskArtifactView};
 pub use event::{TaskEvent, TaskFeedItem, TaskSubscription};
 pub use execution::{
     TaskAgentMessageView, TaskAgentRunView, TaskAgentSessionView, TaskExecutionSummary,

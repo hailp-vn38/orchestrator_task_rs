@@ -551,14 +551,27 @@ pub struct WikiDeleteOutcome {
 | `available_agents` | `pub fn available_agents(&self) -> Vec<AgentCatalogEntry>` | Danh sách tất cả Root/Primary Agents khả dụng kèm mô tả từ mọi Flow đã đăng ký. |
 | `get_task` | `pub async fn get_task(&self, task_id: &str) -> TaskResult<TaskView>` | Lấy `TaskView` theo `task_id` trên `default_scope` (`ErrorCode::NotFound` nếu không tồn tại hoặc khác scope). |
 | `get_task_scoped` | `pub async fn get_task_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<TaskView>` | Lấy `TaskView` theo `task_id` trên `scope` chỉ định. |
-| `get_task_detail` | `pub async fn get_task_detail(&self, task_id: &str) -> TaskResult<TaskDetailView>` | Lấy chi tiết đầy đủ của Task trên `default_scope`: gồm `TaskView`, `FollowupView`, tổng hợp `execution_summary`, chi tiết phiên `root_agent` + `subagents` (có `Serialize`) và `FamilySnapshot` gốc. |
+| `get_task_any_scope` | `pub async fn get_task_any_scope(&self, task_id: &str) -> TaskResult<TaskView>` | Lấy `TaskView` theo `task_id` bất kể `TaskScope` (phục vụ Admin UI). |
+| `get_task_detail` | `pub async fn get_task_detail(&self, task_id: &str) -> TaskResult<TaskDetailView>` | Lấy chi tiết đầy đủ của Task trên `default_scope`: gồm `TaskView`, `FollowupView`, danh sách `artifacts` (`TaskArtifactView`), tổng hợp `execution_summary`, chi tiết phiên `root_agent` + `subagents` (có `Serialize`) và `FamilySnapshot` gốc. |
 | `get_task_detail_scoped` | `pub async fn get_task_detail_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<TaskDetailView>` | Lấy `TaskDetailView` trên `scope` chỉ định. |
+| `get_task_detail_any_scope` | `pub async fn get_task_detail_any_scope(&self, task_id: &str) -> TaskResult<TaskDetailView>` | Lấy `TaskDetailView` bất kể `TaskScope` (phục vụ Admin UI). |
+| `list_task_artifacts` | `pub async fn list_task_artifacts(&self, task_id: &str) -> TaskResult<Vec<TaskArtifactView>>` | Liệt kê toàn bộ các Artifact đa định dạng (`Report`, `Image`, `Audio`, `Document`, `Data`, `Other`) thuộc về một Task trên `default_scope`. |
+| `list_task_artifacts_scoped` | `pub async fn list_task_artifacts_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<Vec<TaskArtifactView>>` | Liệt kê danh sách `TaskArtifactView` của một Task trên `scope` chỉ định. |
+| `list_task_artifacts_any_scope` | `pub async fn list_task_artifacts_any_scope(&self, task_id: &str) -> TaskResult<Vec<TaskArtifactView>>` | Liệt kê danh sách `TaskArtifactView` của một Task bất kể `TaskScope`. |
+| `open_task_artifact` | `pub async fn open_task_artifact(&self, task_id: &str, artifact_id: &str) -> TaskResult<TaskArtifactDownload>` | Mở một Artifact của Task để đọc/stream kèm xác minh SHA-256 trên `default_scope`. |
+| `open_task_artifact_scoped` | `pub async fn open_task_artifact_scoped(&self, scope: &TaskScope, task_id: &str, artifact_id: &str) -> TaskResult<TaskArtifactDownload>` | Mở một Artifact của Task để đọc/stream kèm xác minh SHA-256 trên `scope` chỉ định. |
+| `open_task_artifact_any_scope` | `pub async fn open_task_artifact_any_scope(&self, task_id: &str, artifact_id: &str) -> TaskResult<TaskArtifactDownload>` | Mở một Artifact của Task bất kể `TaskScope`. |
+| `read_task_artifact_bytes` | `pub async fn read_task_artifact_bytes(&self, task_id: &str, artifact_id: &str) -> TaskResult<(TaskArtifactView, Vec<u8>)>` | Đọc toàn bộ bytes đã xác minh SHA-256 của một Task Artifact trên `default_scope`. |
+| `read_task_artifact_bytes_any_scope` | `pub async fn read_task_artifact_bytes_any_scope(&self, task_id: &str, artifact_id: &str) -> TaskResult<(TaskArtifactView, Vec<u8>)>` | Đọc toàn bộ bytes đã xác minh SHA-256 của một Task Artifact bất kể `TaskScope`. |
 | `get_task_agent_history` | `pub async fn get_task_agent_history(&self, task_id: &str, session_or_agent_id: Option<&str>, limit: Option<u32>) -> TaskResult<Vec<TaskAgentMessageView>>` | Lấy lịch sử tin nhắn (`user`, `assistant`, `tool`) của Root Agent (`None`) hoặc một Subagent cụ thể (theo `session_id` hoặc `agent_id`) trong Task thuộc `default_scope`. |
 | `get_task_agent_history_scoped` | `pub async fn get_task_agent_history_scoped(&self, scope: &TaskScope, task_id: &str, session_or_agent_id: Option<&str>, limit: Option<u32>) -> TaskResult<Vec<TaskAgentMessageView>>` | Lấy lịch sử tin nhắn của Root Agent hoặc Subagent trong Task thuộc `scope` chỉ định. |
+| `get_task_agent_history_any_scope` | `pub async fn get_task_agent_history_any_scope(&self, task_id: &str, session_or_agent_id: Option<&str>, limit: Option<u32>) -> TaskResult<Vec<TaskAgentMessageView>>` | Lấy lịch sử tin nhắn của Root Agent hoặc Subagent bất kể `TaskScope`. |
 | `list_tasks` | `pub async fn list_tasks(&self, filter: &TaskFilter) -> TaskResult<TaskPage<TaskView>>` | Liệt kê Task có phân trang trên `default_scope`, sắp xếp mới nhất trước (`created_at DESC`). |
 | `list_tasks_scoped` | `pub async fn list_tasks_scoped(&self, scope: &TaskScope, filter: &TaskFilter) -> TaskResult<TaskPage<TaskView>>` | Liệt kê Task có phân trang trên `scope` chỉ định. |
+| `list_all_tasks` | `pub async fn list_all_tasks(&self, filter: &TaskFilter) -> TaskResult<TaskPage<TaskView>>` | Liệt kê Task trên toàn bộ `TaskScope` (kèm lọc `filter.query` trực tiếp bằng SQL). |
 | `subscribe` | `pub fn subscribe(&self) -> TaskResult<TaskSubscription>` | Mở kênh nhận sự kiện thời gian thực (`TaskEvent`) lọc theo `default_scope`. |
 | `subscribe_scoped` | `pub fn subscribe_scoped(&self, scope: TaskScope) -> TaskResult<TaskSubscription>` | Mở kênh nhận sự kiện thời gian thực lọc theo `scope` chỉ định. |
+| `subscribe_all` | `pub fn subscribe_all(&self) -> TaskResult<TaskSubscription>` | Mở kênh nhận sự kiện thời gian thực từ toàn bộ `TaskScope` (phục vụ Admin UI và System Reminder Bridge). |
 
 ### 6.2. Các kiểu dữ liệu Truy vấn & Chi tiết Thực thi Agent (`TaskDetailView` & `src/types/execution.rs`)
 
@@ -569,6 +582,7 @@ pub struct WikiDeleteOutcome {
 pub struct TaskDetailView {
     pub task: TaskView,
     pub followups: Vec<FollowupView>,
+    pub artifacts: Vec<TaskArtifactView>,
     pub execution_summary: Option<TaskExecutionSummary>,
     pub root_agent: Option<TaskAgentSessionView>,
     pub subagents: Vec<TaskAgentSessionView>,
@@ -579,6 +593,7 @@ pub struct TaskDetailView {
 
 Các phương thức tiện ích trên `TaskDetailView`:
 - `pub fn from_parts(task: TaskView, followups: Vec<FollowupView>, family_snapshot: Option<FamilySnapshot>) -> Self`
+- `pub fn from_parts_with_artifacts(task: TaskView, followups: Vec<FollowupView>, family_snapshot: Option<FamilySnapshot>, artifacts: Vec<TaskArtifactView>) -> Self`
 - `pub fn all_agents(&self) -> Vec<&TaskAgentSessionView>`: trả về danh sách mọi phiên Agent trong Task (`root_agent` đứng đầu, tiếp theo là `subagents`).
 - `pub fn find_agent_session(&self, session_or_agent_id: &str) -> Option<&TaskAgentSessionView>`: tìm phiên thực thi của một Agent theo `session_id` hoặc `agent_id`.
 
@@ -596,6 +611,18 @@ pub struct TaskExecutionSummary {
     pub total_output_tokens: u64,
     pub total_tokens: u64,
     pub total_tool_calls: usize,
+    pub succeeded_tool_calls: usize,
+    pub failed_tool_calls: usize,
+    pub failed_error_codes: Vec<String>,
+    pub sources_written: Vec<String>,
+    pub wiki_pages_written: Vec<String>,
+    pub total_artifacts: usize,
+    pub primary_artifacts: usize,
+    pub report_artifacts: usize,
+    pub image_artifacts: usize,
+    pub audio_artifacts: usize,
+    pub artifact_ids: Vec<String>,
+    pub last_lint_healthy: Option<bool>,
     pub children_truncated: bool,
 }
 

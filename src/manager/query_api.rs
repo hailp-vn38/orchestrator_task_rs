@@ -9,8 +9,8 @@ use crate::error::TaskResult;
 use crate::manager::TaskManager;
 use crate::tools::TaskToolSuite;
 use crate::types::{
-    AgentCatalogEntry, TaskAgentMessageView, TaskDetailView, TaskFilter, TaskPage, TaskScope,
-    TaskSubscription, TaskView,
+    AgentCatalogEntry, TaskAgentMessageView, TaskArtifactDownload, TaskArtifactView,
+    TaskDetailView, TaskFilter, TaskPage, TaskScope, TaskSubscription, TaskView,
 };
 
 impl TaskManager {
@@ -167,5 +167,90 @@ impl TaskManager {
             .store
             .list_tasks_all(filter, self.core.config.runtime.page_size)
             .await
+    }
+
+    /// Liệt kê toàn bộ các Artifact đa định dạng (Report, Image, Audio/TTS, Document, Data)
+    /// của một Task trong `default_scope`.
+    pub async fn list_task_artifacts(&self, task_id: &str) -> TaskResult<Vec<TaskArtifactView>> {
+        let scope = &self.core.config.default_scope;
+        self.list_task_artifacts_scoped(scope, task_id).await
+    }
+
+    /// Liệt kê toàn bộ các Artifact đa định dạng của một Task trong `TaskScope` chỉ định.
+    pub async fn list_task_artifacts_scoped(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+    ) -> TaskResult<Vec<TaskArtifactView>> {
+        self.core.list_task_artifacts_internal(scope, task_id).await
+    }
+
+    /// Liệt kê toàn bộ các Artifact đa định dạng của một Task bất kể `TaskScope` (cho Admin UI).
+    pub async fn list_task_artifacts_any_scope(
+        &self,
+        task_id: &str,
+    ) -> TaskResult<Vec<TaskArtifactView>> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.list_task_artifacts_scoped(&scope, task_id).await
+    }
+
+    /// Mở một Artifact thuộc về một Task trong `default_scope` để đọc/stream kèm xác minh SHA-256.
+    pub async fn open_task_artifact(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> TaskResult<TaskArtifactDownload> {
+        let scope = &self.core.config.default_scope;
+        self.open_task_artifact_scoped(scope, task_id, artifact_id)
+            .await
+    }
+
+    /// Mở một Artifact thuộc về một Task trong `TaskScope` chỉ định để đọc/stream kèm xác minh SHA-256.
+    pub async fn open_task_artifact_scoped(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> TaskResult<TaskArtifactDownload> {
+        self.core
+            .open_task_artifact_internal(scope, task_id, artifact_id)
+            .await
+    }
+
+    /// Mở một Artifact thuộc về một Task bất kể `TaskScope` (cho Admin UI).
+    pub async fn open_task_artifact_any_scope(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> TaskResult<TaskArtifactDownload> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.open_task_artifact_scoped(&scope, task_id, artifact_id)
+            .await
+    }
+
+    /// Đọc toàn bộ bytes đã xác minh SHA-256 của một Task Artifact trong `default_scope`.
+    pub async fn read_task_artifact_bytes(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> TaskResult<(TaskArtifactView, Vec<u8>)> {
+        let dl = self.open_task_artifact(task_id, artifact_id).await?;
+        let meta = dl.metadata.clone();
+        let bytes = dl.read_all_bytes().await?;
+        Ok((meta, bytes))
+    }
+
+    /// Đọc toàn bộ bytes đã xác minh SHA-256 của một Task Artifact bất kể `TaskScope` (cho Admin UI).
+    pub async fn read_task_artifact_bytes_any_scope(
+        &self,
+        task_id: &str,
+        artifact_id: &str,
+    ) -> TaskResult<(TaskArtifactView, Vec<u8>)> {
+        let dl = self
+            .open_task_artifact_any_scope(task_id, artifact_id)
+            .await?;
+        let meta = dl.metadata.clone();
+        let bytes = dl.read_all_bytes().await?;
+        Ok((meta, bytes))
     }
 }

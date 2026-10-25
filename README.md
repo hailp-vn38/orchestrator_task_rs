@@ -6,13 +6,14 @@ Thư viện được nhúng vào host chạy Tokio; repository hiện không cun
 
 ## Chức năng
 
-- Tạo, theo dõi, hủy và truy vấn Task gắn với session của một Flow.
+- Tạo, theo dõi, hủy và truy vấn Task gắn với session của một Flow (hỗ trợ cả truy vấn theo `TaskScope` và truy vấn xuyên suốt toàn bộ scope `list_all_tasks` / `*_any_scope` cho Admin UI).
+- Quản lý và tải xuống **Multi-Kind Task Artifacts** (`Report`, `Image`, `Audio`/TTS, `Document`, `Data`, `Other`) do Root Agent hoặc Subagent xuất bản, kèm xác minh toàn vẹn SHA-256.
 - Xếp hàng Followup và chuyển tiếp khi session sẵn sàng.
 - Lập Schedule một lần hoặc theo cron, để nhắc nhở hoặc khởi tạo Task.
 - Chuyển tín hiệu Wiki Auto-Flow thành Task được quản lý cùng các Task khác.
-- Cung cấp công cụ dưới dạng `HostTool` cho Orchestrator và JSON schema/JSON execution cho Voice Agent.
+- Cung cấp công cụ dưới dạng `HostTool` cho Orchestrator (bao gồm bộ công cụ đa phương tiện cho Subagent: `image_create`, `tts_synthesize`, `artifact_create`, `markdown_create`) và JSON schema/JSON execution cho Voice Agent.
 - Lưu trạng thái trong SQLite riêng (`tasks.db`), kiểm soát quyền sở hữu bằng `tasks.owner.lock`, và reconcile Task khi khởi động lại.
-- Phát sự kiện qua subscription để host tích hợp giao diện hoặc luồng cập nhật.
+- Phát sự kiện qua subscription (`subscribe`, `subscribe_scoped`, `subscribe_all`) để host tích hợp giao diện hoặc luồng cập nhật.
 
 ## Chuẩn bị môi trường
 
@@ -82,7 +83,7 @@ Flow phải chứa agent có thể làm root (`Primary` hoặc `All`); `daily_ro
 
 Scope mặc định là `owner_id = "personal"`, `workspace_id = "homelab"`; host có thể dùng các API `*_scoped` để chỉ định scope. Mỗi store chỉ được một `TaskManager` sở hữu tại một thời điểm. Dùng thư mục store riêng với store của Orchestrator và Wiki.
 
-Bộ tools điều phối gồm `task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `task_delete`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete` (lấy qua `task_host_tools()`, `reminder_host_tools()`, `all_host_tools()` hoặc `voice_tool_suite()`). Ngoài ra, `WorkspaceToolKit` cung cấp sẵn trọn bộ `HostTool` cho kiến trúc Dual-Flow (`wiki_host_tools`, `wiki_readonly_host_tools`, `add_to_sources_host_tool`, `report_host_tools`, `youtube_host_tools`, `pdf_host_tools`, `web_host_tools`) để host lấy ra và đăng ký trực tiếp mà không cần viết lại.
+Bộ tools điều phối gồm `task_create`, `task_followup`, `task_list`, `task_detail`, `task_cancel`, `task_delete`, `reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete` (lấy qua `task_host_tools()`, `reminder_host_tools()`, `all_host_tools()` hoặc `voice_tool_suite()`). Ngoài ra, `WorkspaceToolKit` cung cấp sẵn trọn bộ `HostTool` cho kiến trúc Dual-Flow (`wiki_host_tools`, `wiki_readonly_host_tools`, `add_to_sources_host_tool`, `report_host_tools`, `media_host_tools` gồm `image_create` / `tts_synthesize` / `artifact_create`, `youtube_host_tools`, `pdf_host_tools`, `web_host_tools`) để host lấy ra và đăng ký trực tiếp mà không cần viết lại.
 
 ## Kiểm tra cục bộ
 
@@ -119,6 +120,7 @@ Nếu repository dependency là private, cấu hình Actions secret `DEPENDENCIE
 | `migrations/` | Schema SQLite, nhúng khi biên dịch |
 
 - [Tài liệu API đầy đủ (`docs/API.md`)](docs/API.md)
+- [Đặc tả Multi-Kind Task Artifacts & Subagent Media Tools (`docs/Multi-Kind Task Artifacts Spec.md`)](docs/Multi-Kind%20Task%20Artifacts%20Spec.md)
 - [Từ điển miền](GLOSSARY.md)
 - [Đặc tả Task và Dual-Flow hợp nhất](docs/Unified%20Task%20And%20Dualflow%20Spec.md)
 - [Đặc tả kiến trúc Dual-Flow](docs/Dual%20Flow%20Architecture%20Spec.md)
