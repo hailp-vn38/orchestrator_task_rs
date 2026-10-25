@@ -355,11 +355,16 @@ impl TaskAgentMessageView {
             MessageRole::Tool => "tool",
             _ => "unknown",
         };
+        let text = if matches!(msg.role, MessageRole::Assistant) {
+            llm_wiki::normalize_media_markdown_links(&msg.text)
+        } else {
+            msg.text.clone()
+        };
         Self {
             id: msg.id.clone(),
             sequence: msg.sequence,
             role: role.to_string(),
-            text: msg.text.clone(),
+            text,
             run_id: msg.run_id.clone(),
             tool_call_id: msg.tool_call_id.clone(),
             tool_calls: msg

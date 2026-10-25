@@ -364,9 +364,10 @@ impl HostTool for HtmlTool {
                 if !article.images.is_empty() {
                     body.push_str("## Ảnh / Infographic trong bài\n\n");
                     for img in &article.images {
-                        let alt = img["alt"].as_str().unwrap_or("");
-                        let src = img["url"].as_str().unwrap_or("");
-                        body.push_str(&format!("- {alt}: {src}\n"));
+                        let alt = img["alt"].as_str().unwrap_or("").trim();
+                        let src = img["url"].as_str().unwrap_or("").trim();
+                        let label = if alt.is_empty() { "image" } else { alt };
+                        body.push_str(&format!("- ![{label}]({src})\n"));
                     }
                 }
                 let total_chars = body.chars().count();

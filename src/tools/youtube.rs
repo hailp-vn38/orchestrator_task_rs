@@ -163,6 +163,7 @@ impl YoutubeCollectorEnv {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let youtube_url = format!("https://www.youtube.com/watch?v={video_id}");
+        let youtube_embed_md = format!("![{title}]({youtube_url})");
 
         let written = self
             .engine
@@ -180,7 +181,7 @@ impl YoutubeCollectorEnv {
                     ("playlist_index".to_string(), json!(idx)),
                 ],
                 header_bullets: vec![
-                    ("YouTube URL".to_string(), format!("<{youtube_url}>")),
+                    ("YouTube URL".to_string(), youtube_embed_md),
                     ("Playlist URL".to_string(), format!("<{playlist_url}>")),
                     ("Video ID".to_string(), format!("`{video_id}`")),
                     ("Thứ tự trong Playlist".to_string(), format!("#{idx}")),
@@ -382,6 +383,7 @@ impl HostTool for YtFetchTranscriptTool {
             "VIDEO_ID: {video_id}\n\
              TITLE: {title}\n\
              YOUTUBE_URL: {youtube_url}\n\
+             YOUTUBE_MARKDOWN: ![{title}]({youtube_url})\n\
              CONTENT_LENGTH_CHARS: {char_count}\n\
              CONTENT_LINES: {line_count}\n\n\
              === BEGIN TRANSCRIPT ===\n\

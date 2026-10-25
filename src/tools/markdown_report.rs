@@ -76,7 +76,8 @@ impl HostTool for MarkdownCreateTool {
         std::fs::create_dir_all(&self.reports_dir)
             .map_err(|e| host_tool_err("IO_ERROR", e.to_string()))?;
         let full_path = self.reports_dir.join(&safe_name);
-        let trimmed_body = body.trim();
+        let normalized_body = llm_wiki::normalize_media_markdown_links(body.trim());
+        let trimmed_body = normalized_body.trim();
         let content = if trimmed_body.starts_with("# ") {
             format!("{trimmed_body}\n")
         } else {

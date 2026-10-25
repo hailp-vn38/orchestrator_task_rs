@@ -1470,8 +1470,6 @@ dependencies = [
 [[package]]
 name = "llm-wiki-rs"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0731816edcff436463e97c70facdefe0006b040970f74ae7a114ba62ba532895"
 dependencies = [
  "blake3",
  "chrono",

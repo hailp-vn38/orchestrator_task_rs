@@ -704,7 +704,8 @@ fn normalize_collection_rel_path(collection: &str, raw: &str) -> String {
 
 fn clip_preview(text: &str, max_chars: usize) -> String {
     let cleaned = orchestrator_agent_rs::strip_thinking_blocks(text);
-    let trimmed = cleaned.trim();
+    let normalized = llm_wiki::normalize_media_markdown_links(cleaned.trim());
+    let trimmed = normalized.trim();
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
     }

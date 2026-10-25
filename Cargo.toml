@@ -42,4 +42,5 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "test-util"] }
 
 [patch.crates-io]
+llm-wiki-rs = { path = "../llm-wiki-rs" }
 orchestrator-agent = { path = "../orchestrator_agent_rs" }
