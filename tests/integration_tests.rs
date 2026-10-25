@@ -642,6 +642,57 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
     assert!(!toolkit.wiki_readonly_host_tools().is_empty());
     assert!(toolkit.wiki_host_tools().len() > toolkit.wiki_readonly_host_tools().len());
 
+    // Kiểm tra phân bổ Tool chuẩn giữa Flow 1 (`daily_flow_host_tools` — Thu thập & Đa chức năng)
+    // và Flow 2 (`wiki_flow_host_tools` — Đường ống biên dịch Wiki khi `sources/` có file mới)
+    let daily_tool_names: Vec<String> = toolkit
+        .daily_flow_host_tools(&task_init)
+        .iter()
+        .map(|t| t.descriptor().name)
+        .collect();
+    for expected in [
+        "yt_list_playlist",
+        "yt_fetch_transcript",
+        "anydoc_inspect_pdf",
+        "anydoc_save_to_sources",
+        "fetch_html",
+        "add_to_sources",
+        "markdown_create",
+        "image_create",
+        "tts_synthesize",
+        "artifact_create",
+        "reminder_create",
+        "wiki_query",
+        "wiki_get",
+    ] {
+        assert!(
+            daily_tool_names.iter().any(|n| n == expected),
+            "daily_flow_host_tools must include '{expected}'"
+        );
+    }
+    assert!(
+        !daily_tool_names.iter().any(|n| n == "wiki_ingest_source"),
+        "daily_flow_host_tools must remain read-only on wiki/"
+    );
+
+    let wiki_tool_names: Vec<String> = toolkit
+        .wiki_flow_host_tools()
+        .iter()
+        .map(|t| t.descriptor().name)
+        .collect();
+    assert_eq!(wiki_tool_names.len(), toolkit.wiki_host_tools().len());
+    for forbidden in [
+        "yt_list_playlist",
+        "yt_fetch_transcript",
+        "anydoc_inspect_pdf",
+        "anydoc_save_to_sources",
+        "fetch_html",
+    ] {
+        assert!(
+            !wiki_tool_names.iter().any(|n| n == forbidden),
+            "wiki_flow_host_tools must not include external collector tool '{forbidden}'"
+        );
+    }
+
     // Tạo sample PDF và nạp vào `toolkit.pdf_state`
     let pdf_path = dir.path().join("sample.pdf");
     std::fs::write(&pdf_path, build_sample_technical_pdf()).unwrap();

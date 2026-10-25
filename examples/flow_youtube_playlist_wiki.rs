@@ -128,7 +128,7 @@ async fn main() -> ExampleResult<()> {
     let mut sub = app.task_mgr.subscribe()?;
 
     println!(
-        "\n=== [2. Khởi tạo Task thu thập Playlist trên `wiki_root` (`task_create` Fire-and-Forget)] ==="
+        "\n=== [2. Khởi tạo Task thu thập Playlist trên `daily_root` (`task_create` Fire-and-Forget)] ==="
     );
     let task_prompt = format!(
         "Hãy lấy thông tin chi tiết trong playlist và lưu vào source theo chủ đề.\nPlaylist URL: {}",
@@ -140,7 +140,7 @@ async fn main() -> ExampleResult<()> {
             json!({
                 "title": format!("Thu thập YouTube Playlist vào Wiki ({})", cli.playlist_url),
                 "prompt": task_prompt,
-                "target_agent": "wiki_root"
+                "target_agent": "daily_root"
             }),
         )
         .await?;

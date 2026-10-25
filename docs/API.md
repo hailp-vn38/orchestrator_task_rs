@@ -1025,8 +1025,8 @@ for tool in toolkit.wiki_flow_host_tools() {
 | `toolkit.pdf_host_tools()` / `pdf_host_tools(pdf_state)` | `anydoc_inspect_pdf`, `anydoc_save_to_sources` | Chuyển đổi PDF/Office sang GFM Markdown bằng `anydoc`, lưu vào `sources/` kèm báo hiệu Auto-Flow. |
 | `toolkit.web_host_tools()` / `web_host_tools(html_workspace)` | 6 tools `HTML_TOOL_NAMES`: `fetch_html`, `html_extract_metadata`, `html_extract_article`, `html_extract_feed`, `html_extract_links`, `html_select_elements` | Tải trang web qua `curl` (có cache trong `HtmlWorkspace` & lưu artifact) và bóc tách metadata, bài viết, danh sách tin chuyên mục, liên kết và phần tử HTML. |
 | `toolkit.collector_host_tools()` | 10 tools (`anydoc_*` + `yt_*` + `fetch_html`/`html_*`) | Toàn bộ công cụ thu thập nguồn bên ngoài (PDF, YouTube, Web/HTML). |
-| `toolkit.daily_flow_host_tools(&task_init)` | `wiki_*` (read-only) + `web_host_tools()` + `add_to_sources` + `markdown_*` + `reminder_*` | Bộ công cụ trọn gói cho Flow 2 (`daily_orch`). |
-| `toolkit.wiki_flow_host_tools()` | `wiki_*` (full) + `anydoc_*` + `yt_*` + `web_host_tools()` | Bộ công cụ trọn gói cho Flow 1 (`wiki_orch`). |
+| `toolkit.daily_flow_host_tools(&task_init)` | `wiki_*` (read-only) + `collector_host_tools()` (`anydoc_*` + `yt_*` + `fetch_html`/`html_*`) + `add_to_sources` + `markdown_*` + `image_create`/`tts_synthesize`/`artifact_create` + `reminder_*` | Bộ công cụ trọn gói cho Flow 1 (`daily_orch` — Thu thập thông tin & Đa chức năng). |
+| `toolkit.wiki_flow_host_tools()` | 14 tools `wiki_*` (full) | Bộ công cụ trọn gói cho Flow 2 (`wiki_orch` — Đường ống Wiki Tự động khi `sources/` có file mới). |
 | `toolkit.all_host_tools(&task_init)` | Toàn bộ công cụ của cả 2 Flow + `reminder_*` | Bộ công cụ trọn gói cho mô hình 1 `Orchestrator` hợp nhất. |
 | `toolkit.all_host_tools_with_tasks(&task_init)` | `all_host_tools` + 6 tool `task_*` | Bộ công cụ trọn gói kèm cả 6 tool điều phối `task_*`. |
 
@@ -1263,9 +1263,9 @@ Xóa vĩnh viễn một lời nhắc hoặc lịch hẹn.
 | `report_host_tools` | `pub fn report_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Cặp tool `[markdown_create, markdown_read]`. |
 | `youtube_host_tools` | `pub fn youtube_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Cặp tool `[yt_list_playlist, yt_fetch_transcript]`. |
 | `pdf_host_tools` | `pub fn pdf_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Cặp tool `[anydoc_inspect_pdf, anydoc_save_to_sources]`. |
-| `collector_host_tools` | `pub fn collector_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Gộp 4 tool thu thập nguồn (`anydoc_*` + `yt_*`). |
-| `daily_flow_host_tools` | `pub fn daily_flow_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>>` | Bộ tool chuẩn cho Flow `daily` (`wiki_readonly` + `add_to_sources` + `markdown_*` + 4 `reminder_*`). |
-| `wiki_flow_host_tools` | `pub fn wiki_flow_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Bộ tool chuẩn cho Flow `wiki` (`collector_host_tools` + 14 `wiki_*`). |
+| `collector_host_tools` | `pub fn collector_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Gộp 10 tool thu thập nguồn (`anydoc_*` + `yt_*` + `fetch_html`/`html_*`). |
+| `daily_flow_host_tools` | `pub fn daily_flow_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>>` | Bộ tool chuẩn cho Flow 1 `daily` (`wiki_readonly` + `collector_host_tools` + `add_to_sources` + `markdown_*` + `media_host_tools` + 4 `reminder_*`). |
+| `wiki_flow_host_tools` | `pub fn wiki_flow_host_tools(&self) -> Vec<Arc<dyn HostTool>>` | Bộ tool chuẩn cho Flow 2 `wiki` (14 `wiki_*`, không chứa tool thu thập ngoại vi). |
 | `all_host_tools` | `pub fn all_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>>` | Bộ tool chuẩn cho 1 `Orchestrator` hợp nhất (`collector` + `add_to_sources` + `markdown_*` + 4 `reminder_*` + 14 `wiki_*`). |
 | `all_host_tools_with_tasks` | `pub fn all_host_tools_with_tasks(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>>` | Bao gồm toàn bộ `all_host_tools` cộng thêm 6 tool `task_*`. |
 

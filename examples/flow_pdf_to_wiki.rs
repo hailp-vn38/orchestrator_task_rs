@@ -76,7 +76,7 @@ async fn main() -> ExampleResult<()> {
         .join("\n");
 
     println!(
-        "\n=== [1. Tạo Task xử lý PDF trên `wiki_root` (`anydoc` -> `sources/` -> Managed Auto-Flow)] ==="
+        "\n=== [1. Tạo Task xử lý PDF trên `daily_root` (`anydoc` -> `sources/` -> Managed Auto-Flow)] ==="
     );
     let task = app
         .task_mgr
@@ -92,7 +92,7 @@ async fn main() -> ExampleResult<()> {
                      Sau khi `source_collector` lưu xong vào `sources/`, hãy kết thúc lượt chạy này để hệ thống Auto-Flow đảm nhận bước biên dịch tiếp theo."
                 ),
             )
-            .with_target("wiki_root")
+            .with_target("daily_root")
             .with_source(TaskSource::Api),
         )
         .await?;

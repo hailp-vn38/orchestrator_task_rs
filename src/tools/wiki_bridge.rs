@@ -267,7 +267,7 @@ impl HostTool for AddToSourcesTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "add_to_sources".to_string(),
-            description: "Stage a synthesized Markdown document into `sources/<domain>/<topic>/<slug>.md` (with provenance, conflict & open-question guardrails) and immediately trigger the Flow 1 background Wiki compiler (`autoflow_notify`).".to_string(),
+            description: "Stage a synthesized Markdown document into `sources/<domain>/<topic>/<slug>.md` (with provenance, conflict & open-question guardrails) and immediately trigger the Flow 2 background Wiki compiler (`autoflow_notify`).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["topic_folder", "title", "markdown_body"],
@@ -300,11 +300,11 @@ impl HostTool for AddToSourcesTool {
                     },
                     "target_hint": {
                         "type": "string",
-                        "description": "Optional hint for Flow 1 (`wiki_ingestor`) indicating existing Wiki pages (`entities/<slug>`, `concepts/<slug>`, `wiki/sources/...`) to update or cross-link."
+                        "description": "Optional hint for Flow 2 (`wiki_ingestor`) indicating existing Wiki pages (`entities/<slug>`, `concepts/<slug>`, `wiki/sources/...`) to update or cross-link."
                     },
                     "conflict_with": {
                         "type": "string",
-                        "description": "Optional existing Wiki page path/slug that this synthesis contradicts so Flow 1 preserves both perspectives non-destructively."
+                        "description": "Optional existing Wiki page path/slug that this synthesis contradicts so Flow 2 preserves both perspectives non-destructively."
                     },
                     "open_questions": {
                         "type": "array",

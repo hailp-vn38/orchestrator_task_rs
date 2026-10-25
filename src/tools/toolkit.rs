@@ -216,12 +216,13 @@ impl WorkspaceToolKit {
         tools
     }
 
-    /// Xuất bộ `HostTool` chuẩn cho **Flow 2 (`daily_orch`)** khi tách riêng 2 instance `Orchestrator`:
-    /// gồm `wiki_readonly_host_tools()`, `web_host_tools()`, `add_to_sources`, `markdown_create`, `markdown_read`,
-    /// `image_create`, `tts_synthesize`, `artifact_create`, và 4 tool `reminder_*` từ `TaskManagerInit`.
+    /// Xuất bộ `HostTool` chuẩn cho **Flow 1 (`daily_orch` / `daily_root` — Thu thập thông tin & Đa chức năng)** khi tách riêng 2 instance `Orchestrator`:
+    /// gồm `wiki_readonly_host_tools()`, `collector_host_tools()` (`anydoc_*` + `yt_*` + `fetch_html`/`html_*`),
+    /// `add_to_sources`, `markdown_create`, `markdown_read`, `image_create`, `tts_synthesize`, `artifact_create`,
+    /// và 4 tool `reminder_*` từ `TaskManagerInit`.
     pub fn daily_flow_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>> {
         let mut tools = self.wiki_readonly_host_tools();
-        tools.extend(self.web_host_tools());
+        tools.extend(self.collector_host_tools());
         tools.push(self.add_to_sources_host_tool());
         tools.extend(self.report_host_tools());
         tools.extend(self.media_host_tools());
@@ -229,12 +230,10 @@ impl WorkspaceToolKit {
         tools
     }
 
-    /// Xuất bộ `HostTool` chuẩn cho **Flow 1 (`wiki_orch`)** khi tách riêng 2 instance `Orchestrator`:
-    /// gồm toàn bộ 14 tool `wiki_*` (đọc + ghi) và 10 tool thu thập nguồn (`anydoc_*` + `yt_*` + `fetch_html`/`html_*`).
+    /// Xuất bộ `HostTool` chuẩn cho **Flow 2 (`wiki_orch` / `wiki_root` — Đường ống Wiki Tự động khi `sources/` có file mới)** khi tách riêng 2 instance `Orchestrator`:
+    /// chỉ gồm 14 tool `wiki_*` (đọc + ghi) của `WikiEngine`, hoàn toàn không chứa tool thu thập ngoại vi (`yt_*`, `anydoc_*`, `fetch_html`).
     pub fn wiki_flow_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
-        let mut tools = self.collector_host_tools();
-        tools.extend(self.wiki_host_tools());
-        tools
+        self.wiki_host_tools()
     }
 
     /// Xuất toàn bộ `HostTool` chuẩn cho **1 instance `Orchestrator` hợp nhất** (chứa cả `daily_root` và `wiki_root`):

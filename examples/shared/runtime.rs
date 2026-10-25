@@ -148,21 +148,52 @@ impl HomelabExampleApp {
         // 3. Xây dựng 1 instance `Orchestrator` hợp nhất duy nhất (`orchestrator.db`):
         //    Phân tách cứng 2 luồng `daily_root` và `wiki_root` thông qua `with_allowed_subagents` + `with_allowed_tools`.
         let agents = vec![
-            // === Luồng Tương tác & Tác vụ Hàng ngày (`daily_root`) ===
+            // === Flow 1: Luồng Thu thập thông tin & Thực hiện Đa chức năng (`daily_root`) ===
             AgentDefinition::new("daily_root", "live", &model)
                 .with_mode(AgentMode::Primary)
                 .with_description(
-                    "Interactive & background daily assistant: researches Wiki, creates reports, stages knowledge to sources/, and manages reminders.",
+                    "Interactive & background multi-functional assistant: collects external sources (YouTube playlists, PDFs, Web pages) into sources/, researches Wiki, creates reports, generates media, and manages reminders.",
                 )
                 .with_prompt_path(prompts.join("daily_root.md"))
                 .with_context_limit_tokens(context_limit_tokens)
                 .with_max_output_tokens(max_output_tokens)
                 .with_allowed_tools(["subagent"])
-                .with_allowed_subagents(["wiki_researcher", "report_stager", "reminder_planner"])
-                .with_steps(15),
+                .with_allowed_subagents([
+                    "source_collector",
+                    "wiki_researcher",
+                    "report_stager",
+                    "media_creator",
+                    "reminder_planner",
+                ])
+                .with_steps(20),
+            AgentDefinition::new("source_collector", "live", &model)
+                .with_mode(AgentMode::Subagent)
+                .with_description(
+                    "Inspects external sources (e.g. YouTube playlist, PDF via anydoc, or Web via fetch_html/html_*), extracts detailed transcripts/markdown/metadata, classifies topic hierarchy (<domain>/<topic>), and saves raw Markdown files into sources/<domain>/<topic>/<slug>.md.",
+                )
+                .with_prompt_path(prompts.join("source_collector.md"))
+                .with_context_limit_tokens(context_limit_tokens)
+                .with_max_output_tokens(max_output_tokens)
+                .with_allowed_tools([
+                    "skill",
+                    "anydoc_inspect_pdf",
+                    "anydoc_save_to_sources",
+                    "yt_list_playlist",
+                    "yt_fetch_transcript",
+                    "fetch_html",
+                    "html_extract_metadata",
+                    "html_extract_article",
+                    "html_extract_feed",
+                    "html_extract_links",
+                    "html_select_elements",
+                    "add_to_sources",
+                    "wiki_tree",
+                ])
+                .with_allowed_skills(["wiki-taxonomy"])
+                .with_steps(35),
             AgentDefinition::new("wiki_researcher", "live", &model)
                 .with_mode(AgentMode::Subagent)
-                .with_description("Read-only specialist for querying and reading the LLM Wiki.")
+                .with_description("Read-only specialist for querying and reading the LLM Wiki and inspecting web pages.")
                 .with_prompt_path(prompts.join("wiki_researcher.md"))
                 .with_context_limit_tokens(context_limit_tokens)
                 .with_max_output_tokens(max_output_tokens)
@@ -175,6 +206,12 @@ impl HomelabExampleApp {
                     "wiki_metadata",
                     "wiki_status",
                     "wiki_graph_neighbors",
+                    "fetch_html",
+                    "html_extract_metadata",
+                    "html_extract_article",
+                    "html_extract_feed",
+                    "html_extract_links",
+                    "html_select_elements",
                 ])
                 .with_allowed_skills(["wiki-query"])
                 .with_steps(12),
@@ -196,6 +233,20 @@ impl HomelabExampleApp {
                 ])
                 .with_allowed_skills(["wiki-taxonomy", "daily-synthesis-staging"])
                 .with_steps(12),
+            AgentDefinition::new("media_creator", "live", &model)
+                .with_mode(AgentMode::Subagent)
+                .with_description(
+                    "Generates PNG/SVG images via image_create, synthesizes TTS audio via tts_synthesize, and publishes structured Task Artifacts via artifact_create.",
+                )
+                .with_prompt_path(prompts.join("media_creator.md"))
+                .with_context_limit_tokens(context_limit_tokens)
+                .with_max_output_tokens(max_output_tokens)
+                .with_allowed_tools([
+                    "image_create",
+                    "tts_synthesize",
+                    "artifact_create",
+                ])
+                .with_steps(12),
             AgentDefinition::new("reminder_planner", "live", &model)
                 .with_mode(AgentMode::Subagent)
                 .with_description("Creates, lists, completes, and deletes user reminders and scheduled tasks.")
@@ -211,36 +262,18 @@ impl HomelabExampleApp {
                 ])
                 .with_allowed_skills(["daily-task-reminder"])
                 .with_steps(10),
-            // === Luồng Biên dịch & Kiểm toán Wiki (`wiki_root`) ===
+            // === Flow 2: Luồng Biên dịch & Kiểm toán Wiki Tự động khi `sources/` có file mới (`wiki_root`) ===
             AgentDefinition::new("wiki_root", "live", &model)
                 .with_mode(AgentMode::Primary)
                 .with_description(
-                    "Background Wiki pipeline coordinator: collects external sources (e.g. YouTube playlists), ingests new files from sources/, updates/patches Wiki pages, synthesizes topics, and runs wiki_lint.",
+                    "Automated background Wiki pipeline coordinator triggered when new files are added to sources/: ingests new files from sources/, updates/patches Wiki pages, synthesizes topics, and runs wiki_lint.",
                 )
                 .with_prompt_path(prompts.join("wiki_root.md"))
                 .with_context_limit_tokens(context_limit_tokens)
                 .with_max_output_tokens(max_output_tokens)
                 .with_allowed_tools(["subagent"])
-                .with_allowed_subagents(["source_collector", "wiki_ingestor", "wiki_curator"])
+                .with_allowed_subagents(["wiki_ingestor", "wiki_curator"])
                 .with_steps(40),
-            AgentDefinition::new("source_collector", "live", &model)
-                .with_mode(AgentMode::Subagent)
-                .with_description(
-                    "Inspects external sources (e.g. YouTube playlist or PDF via anydoc), extracts detailed transcripts/markdown/metadata, classifies topic hierarchy (<domain>/<topic>), and saves raw Markdown files into sources/<domain>/<topic>/<slug>.md.",
-                )
-                .with_prompt_path(prompts.join("source_collector.md"))
-                .with_context_limit_tokens(context_limit_tokens)
-                .with_max_output_tokens(max_output_tokens)
-                .with_allowed_tools([
-                    "skill",
-                    "anydoc_inspect_pdf",
-                    "anydoc_save_to_sources",
-                    "yt_list_playlist",
-                    "yt_fetch_transcript",
-                    "wiki_tree",
-                ])
-                .with_allowed_skills(["wiki-taxonomy"])
-                .with_steps(35),
             AgentDefinition::new("wiki_ingestor", "live", &model)
                 .with_mode(AgentMode::Subagent)
                 .with_description("Compiles raw sources into wiki/sources/ and creates/patches entity & concept pages.")
