@@ -268,6 +268,8 @@ pub struct TaskFilter {
     pub source: Option<TaskSource>,
     pub flow_id: Option<String>,
     pub agent_id: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }

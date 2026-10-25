@@ -56,6 +56,12 @@ impl TaskManager {
         Ok(self.core.event_bus.subscribe(scope))
     }
 
+    /// Mở kênh nhận sự kiện real-time (`TaskEvent`) từ mọi `TaskScope` (cho Admin UI và System Reminder Bridge).
+    pub fn subscribe_all(&self) -> TaskResult<TaskSubscription> {
+        self.core.ensure_open()?;
+        Ok(self.core.event_bus.subscribe_all())
+    }
+
     /// Lấy thông tin một Task theo `task_id` trong `default_scope`.
     pub async fn get_task(&self, task_id: &str) -> TaskResult<TaskView> {
         let scope = &self.core.config.default_scope;
@@ -66,6 +72,12 @@ impl TaskManager {
     pub async fn get_task_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<TaskView> {
         self.core.ensure_open()?;
         self.core.store.get_task(scope, task_id).await
+    }
+
+    /// Lấy thông tin một Task theo `task_id` bất kể `TaskScope` (cho Admin UI).
+    pub async fn get_task_any_scope(&self, task_id: &str) -> TaskResult<TaskView> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.get_task_scoped(&scope, task_id).await
     }
 
     /// Lấy chi tiết đầy đủ của một Task cho màn hình chi tiết trên UI View Task:
@@ -82,6 +94,12 @@ impl TaskManager {
         task_id: &str,
     ) -> TaskResult<TaskDetailView> {
         self.core.get_task_detail_internal(scope, task_id).await
+    }
+
+    /// Lấy chi tiết đầy đủ của một Task bất kể `TaskScope` (cho Admin UI).
+    pub async fn get_task_detail_any_scope(&self, task_id: &str) -> TaskResult<TaskDetailView> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.get_task_detail_scoped(&scope, task_id).await
     }
 
     /// Lấy lịch sử tin nhắn (`user`, `assistant`, `tool`) của Root Agent hoặc một Subagent cụ thể
@@ -111,6 +129,18 @@ impl TaskManager {
             .await
     }
 
+    /// Lấy lịch sử tin nhắn của Root Agent hoặc Subagent thuộc một Task bất kể `TaskScope` (cho Admin UI).
+    pub async fn get_task_agent_history_any_scope(
+        &self,
+        task_id: &str,
+        session_or_agent_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> TaskResult<Vec<TaskAgentMessageView>> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.get_task_agent_history_scoped(&scope, task_id, session_or_agent_id, limit)
+            .await
+    }
+
     /// Liệt kê các Task theo bộ lọc cho màn hình danh sách của UI View Task (`default_scope`).
     pub async fn list_tasks(&self, filter: &TaskFilter) -> TaskResult<TaskPage<TaskView>> {
         let scope = &self.core.config.default_scope;
@@ -127,6 +157,15 @@ impl TaskManager {
         self.core
             .store
             .list_tasks(scope, filter, self.core.config.runtime.page_size)
+            .await
+    }
+
+    /// Liệt kê các Task trên toàn bộ `TaskScope` (cho Admin UI).
+    pub async fn list_all_tasks(&self, filter: &TaskFilter) -> TaskResult<TaskPage<TaskView>> {
+        self.core.ensure_open()?;
+        self.core
+            .store
+            .list_tasks_all(filter, self.core.config.runtime.page_size)
             .await
     }
 }

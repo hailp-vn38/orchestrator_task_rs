@@ -49,6 +49,18 @@ impl TaskManager {
             .await
     }
 
+    /// Gửi lệnh bổ sung (Followup) vào Task bất kể `TaskScope` (phục vụ Admin / Global View).
+    pub async fn send_followup_any_scope(
+        &self,
+        task_id: &str,
+        prompt: impl Into<String>,
+        source: TaskSource,
+    ) -> TaskResult<FollowupView> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.send_followup_scoped(&scope, task_id, prompt, source)
+            .await
+    }
+
     /// Hủy một Task đang chạy trong `default_scope`.
     pub async fn cancel_task(&self, task_id: &str) -> TaskResult<TaskView> {
         let scope = &self.core.config.default_scope;
@@ -64,6 +76,12 @@ impl TaskManager {
         self.core.cancel_task_internal(scope, task_id).await
     }
 
+    /// Hủy một Task đang chạy bất kể `TaskScope` (phục vụ Admin / Global View).
+    pub async fn cancel_task_any_scope(&self, task_id: &str) -> TaskResult<TaskView> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.cancel_task_scoped(&scope, task_id).await
+    }
+
     /// Xóa vĩnh viễn một Task trong `default_scope`:
     /// tự động cancel nếu đang chạy, xóa bản ghi trong `tasks.db` + `task_followups`,
     /// xóa Root/Subagent session tương ứng trong `Orchestrator` và phát `TaskEvent::TaskDeleted`.
@@ -75,6 +93,12 @@ impl TaskManager {
     /// Xóa vĩnh viễn một Task trong `TaskScope` chỉ định.
     pub async fn delete_task_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<()> {
         self.core.delete_task_internal(scope, task_id).await
+    }
+
+    /// Xóa vĩnh viễn một Task bất kể `TaskScope` (phục vụ Admin / Global View).
+    pub async fn delete_task_any_scope(&self, task_id: &str) -> TaskResult<()> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.delete_task_scoped(&scope, task_id).await
     }
 
     /// Xóa một trang trong `wiki/` (VD: `"entities/rust/tokio.md"` hoặc `"wiki/entities/rust/tokio.md"`),

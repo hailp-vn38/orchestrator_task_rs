@@ -40,3 +40,6 @@ uuid = { version = "1", features = ["v4"] }
 orchestrator-agent = { version = "0.4.1", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync", "test-util"] }
+
+[patch.crates-io]
+orchestrator-agent = { path = "../orchestrator_agent_rs" }

@@ -51,6 +51,11 @@ pub struct TaskToolSpec {
     pub parameters: Value,
 }
 
+/// Tạo danh sách `TaskToolSpec` chuẩn cho danh sách `AgentCatalogEntry` chỉ định (phục vụ cả runtime lẫn unit test không cần mở DB).
+pub fn build_tool_specs_for_agents(agents: &[AgentCatalogEntry]) -> Vec<TaskToolSpec> {
+    catalog::build_all_tool_specs(agents)
+}
+
 /// Bộ công cụ hợp nhất phục vụ cả Voice Agent (Raw JSON) và `Orchestrator` (`HostTool`).
 #[derive(Clone)]
 pub struct TaskToolSuite {

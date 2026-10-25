@@ -103,6 +103,16 @@ impl SharedTaskCore {
         }
     }
 
+    pub(crate) async fn resolve_task_scope(&self, task_id: &str) -> TaskResult<TaskScope> {
+        self.ensure_open()?;
+        let task = self
+            .store
+            .get_task_unscoped(task_id)
+            .await?
+            .ok_or_else(|| TaskError::not_found(format!("task '{task_id}' not found")))?;
+        Ok(TaskScope::new(task.owner_id, task.workspace_id))
+    }
+
     /// Gửi lệnh bổ sung (Followup) vào một Task đã có:
     /// - Nếu session đang rảnh -> `submit` ngay lập tức và mở lại Watcher.
     /// - Nếu session đang `Running` (`SESSION_BUSY`) -> lưu vào bảng `task_followups` để Watcher tự `submit` khi turn xong.
@@ -122,8 +132,9 @@ impl SharedTaskCore {
         }
 
         let task = self.store.get_task(scope, task_id).await?;
+        let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
         let orch = self.flows()?.get_flow(&task.flow_id)?.clone();
-        let caller = scope.to_caller_context();
+        let caller = task_scope.to_caller_context();
 
         let followup = self
             .store
@@ -161,8 +172,8 @@ impl SharedTaskCore {
         self.event_bus.emit(TaskEvent::FollowupQueued {
             task_id: task.id.clone(),
             followup_id: followup.id.clone(),
-            owner_id: scope.owner_id.clone(),
-            workspace_id: scope.workspace_id.clone(),
+            owner_id: task.owner_id.clone(),
+            workspace_id: task.workspace_id.clone(),
         });
         watcher::ensure_task_watcher(Arc::clone(self), task);
         Ok(followup)
@@ -176,11 +187,12 @@ impl SharedTaskCore {
     ) -> TaskResult<TaskView> {
         self.ensure_open()?;
         let task = self.store.get_task(scope, task_id).await?;
+        let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
         self.store.cancel_pending_followups(&task.id).await?;
 
         if !task.status.is_terminal() {
             let orch = self.flows()?.get_flow(&task.flow_id)?.clone();
-            let caller = scope.to_caller_context();
+            let caller = task_scope.to_caller_context();
             let _ = orch.cancel(&caller, &task.session_id).await;
             if let Some(updated) = self
                 .store
@@ -218,12 +230,13 @@ impl SharedTaskCore {
     ) -> TaskResult<()> {
         self.ensure_open()?;
         let task = self.cancel_task_internal(scope, task_id).await?;
+        let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
 
         if let Some(handle) = lock(&self.active_watchers).remove(&task.id) {
             handle.abort();
         }
 
-        self.store.delete_task(scope, &task.id).await?;
+        self.store.delete_task(&task_scope, &task.id).await?;
 
         let remaining = self
             .store
@@ -232,7 +245,7 @@ impl SharedTaskCore {
             .unwrap_or(1);
         if remaining == 0 {
             if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
-                let caller = scope.to_caller_context();
+                let caller = task_scope.to_caller_context();
                 let _ = orch.delete_session(&caller, &task.session_id).await;
             }
         }
@@ -530,9 +543,10 @@ impl SharedTaskCore {
     ) -> TaskResult<TaskDetailView> {
         self.ensure_open()?;
         let task = self.store.get_task(scope, task_id).await?;
+        let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
         let followups = self.store.list_followups(&task.id).await?;
         let family_snapshot = if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
-            let caller = scope.to_caller_context();
+            let caller = task_scope.to_caller_context();
             orch.snapshot(&caller, &task.session_id).await.ok()
         } else {
             None
@@ -551,8 +565,9 @@ impl SharedTaskCore {
     ) -> TaskResult<Vec<TaskAgentMessageView>> {
         self.ensure_open()?;
         let task = self.store.get_task(scope, task_id).await?;
+        let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
         let orch = self.flows()?.get_flow(&task.flow_id)?;
-        let caller = scope.to_caller_context();
+        let caller = task_scope.to_caller_context();
 
         let target_session_id = match session_or_agent_id.map(str::trim).filter(|s| !s.is_empty()) {
             None => task.session_id.clone(),

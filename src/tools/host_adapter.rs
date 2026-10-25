@@ -63,12 +63,17 @@ impl HostTool for TaskHostTool {
     }
 }
 
-pub(crate) fn build_task_host_tools(core: Arc<SharedTaskCore>) -> Vec<Arc<dyn HostTool>> {
-    let specs = build_voice_task_specs(&[]);
+fn specs_to_host_tools(
+    core: Arc<SharedTaskCore>,
+    specs: Vec<TaskToolSpec>,
+) -> Vec<Arc<dyn HostTool>> {
     specs
         .into_iter()
         .map(|spec| {
-            let effect = if spec.name == TOOL_TASK_LIST || spec.name == TOOL_TASK_DETAIL {
+            let effect = if matches!(
+                spec.name.as_str(),
+                TOOL_REMINDER_LIST | TOOL_TASK_LIST | TOOL_TASK_DETAIL
+            ) {
                 ToolEffect::ReadOnly
             } else {
                 ToolEffect::Mutating
@@ -80,45 +85,16 @@ pub(crate) fn build_task_host_tools(core: Arc<SharedTaskCore>) -> Vec<Arc<dyn Ho
             }) as Arc<dyn HostTool>
         })
         .collect()
+}
+
+pub(crate) fn build_task_host_tools(core: Arc<SharedTaskCore>) -> Vec<Arc<dyn HostTool>> {
+    specs_to_host_tools(core, build_voice_task_specs(&[]))
 }
 
 pub(crate) fn build_reminder_host_tools(core: Arc<SharedTaskCore>) -> Vec<Arc<dyn HostTool>> {
-    let specs = build_reminder_specs(&[]);
-    specs
-        .into_iter()
-        .map(|spec| {
-            let effect = if spec.name == TOOL_REMINDER_LIST {
-                ToolEffect::ReadOnly
-            } else {
-                ToolEffect::Mutating
-            };
-            Arc::new(TaskHostTool {
-                core: Arc::clone(&core),
-                fallback_spec: spec,
-                effect,
-            }) as Arc<dyn HostTool>
-        })
-        .collect()
+    specs_to_host_tools(core, build_reminder_specs(&[]))
 }
 
 pub(crate) fn build_all_host_tools(core: Arc<SharedTaskCore>) -> Vec<Arc<dyn HostTool>> {
-    let specs = build_all_tool_specs(&[]);
-    specs
-        .into_iter()
-        .map(|spec| {
-            let effect = if spec.name == TOOL_REMINDER_LIST
-                || spec.name == TOOL_TASK_LIST
-                || spec.name == TOOL_TASK_DETAIL
-            {
-                ToolEffect::ReadOnly
-            } else {
-                ToolEffect::Mutating
-            };
-            Arc::new(TaskHostTool {
-                core: Arc::clone(&core),
-                fallback_spec: spec,
-                effect,
-            }) as Arc<dyn HostTool>
-        })
-        .collect()
+    specs_to_host_tools(core, build_all_tool_specs(&[]))
 }

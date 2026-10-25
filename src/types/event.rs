@@ -101,10 +101,10 @@ pub enum TaskFeedItem {
     ResyncRequired,
 }
 
-/// Stream sự kiện theo `TaskScope` cho UI View Task (SSE/WebSocket).
+/// Stream sự kiện theo `TaskScope` (hoặc toàn cục khi `scope == None`) cho UI View Task (SSE/WebSocket).
 pub struct TaskSubscription {
     rx: broadcast::Receiver<TaskEvent>,
-    scope: TaskScope,
+    scope: Option<TaskScope>,
     closed: CancellationToken,
     finished: bool,
 }
@@ -117,7 +117,16 @@ impl TaskSubscription {
     ) -> Self {
         Self {
             rx,
-            scope,
+            scope: Some(scope),
+            closed,
+            finished: false,
+        }
+    }
+
+    pub(crate) fn new_all(rx: broadcast::Receiver<TaskEvent>, closed: CancellationToken) -> Self {
+        Self {
+            rx,
+            scope: None,
             closed,
             finished: false,
         }
@@ -131,7 +140,7 @@ impl TaskSubscription {
             tokio::select! {
                 biased;
                 item = self.rx.recv() => match item {
-                    Ok(ev) if ev.matches_scope(&self.scope) => {
+                    Ok(ev) if self.scope.as_ref().is_none_or(|s| ev.matches_scope(s)) => {
                         return Some(TaskFeedItem::Event(ev));
                     }
                     Ok(_) => {}
