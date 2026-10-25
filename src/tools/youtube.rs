@@ -5,7 +5,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use llm_wiki::{sanitize_topic_folder, slugify, vtt_to_text, WikiEngine, WriteTopicSourceRequest};
+use llm_wiki::{
+    clip_transcript, sanitize_topic_folder, slugify, vtt_to_text, WikiEngine,
+    WriteTopicSourceRequest,
+};
 use orchestrator_agent_rs::{
     HostTool, ToolContext, ToolDescriptor, ToolEffect, ToolError, ToolOutcome,
 };
@@ -17,6 +20,9 @@ use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 /// Giới hạn ký tự cho bản xem trước ngắn khi `source_collector` lưu transcript vào `sources/`
 /// (tránh làm đầy context window của `source_collector` khi tải nhiều video liên tiếp).
 const COLLECTOR_PREVIEW_CHARS: usize = 600;
+
+/// Giới hạn ký tự tối đa trả về trực tiếp khi chỉ đọc/tóm tắt transcript (`save_to_sources = false`).
+const READONLY_TRANSCRIPT_MAX_CHARS: usize = 32_000;
 
 /// Thông tin một video trong YouTube Playlist đã được liệt kê hoặc tải phụ đề.
 #[derive(Clone, Debug)]
@@ -198,18 +204,23 @@ impl HostTool for YtFetchTranscriptTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "yt_fetch_transcript".to_string(),
-            description: "Download the subtitles/transcript of a YouTube video using yt-dlp, save the Raw Source Markdown file into `sources/<topic_folder>/<file_stem>.md` organized by topic with hierarchical tags, and notify the background Wiki Auto-Flow worker.".to_string(),
+            description: "Download the subtitles/transcript of a YouTube video using yt-dlp. By default (`save_to_sources=false`), returns the full transcript text directly for summarization/Q&A without writing any file to `sources/`. Set `save_to_sources=true` ONLY when the user explicitly asks to save/ingest the video into `sources/` or the Wiki (which saves `sources/<topic_folder>/<file_stem>.md` and triggers Wiki Auto-Flow).".to_string(),
             input_schema: json!({
                 "type": "object",
-                "required": ["video_id", "topic_folder"],
+                "required": ["video_id"],
                 "properties": {
                     "video_id": {
                         "type": "string",
-                        "description": "YouTube video ID from `yt_list_playlist`"
+                        "description": "YouTube video ID from `yt_list_playlist` or URL"
+                    },
+                    "save_to_sources": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Default `false`. Keep `false` (or omit) when only summarizing/reading a video so NO Markdown file is written to `sources/`. Set to `true` ONLY when the user explicitly requests saving/adding the video to `sources/` or the Wiki."
                     },
                     "topic_folder": {
                         "type": "string",
-                        "description": "Topic folder path inside `sources/` in `kebab-case` (max 2 levels `<domain>/<topic>`, e.g. 'algo-trading/mql5-dca' or 'ai-engineering/rag')."
+                        "description": "Topic folder path inside `sources/` in `kebab-case` (max 2 levels `<domain>/<topic>`, e.g. 'algo-trading/mql5-dca' or 'ai-engineering/rag'). Used only when `save_to_sources=true`."
                     },
                     "title": {
                         "type": "string",
@@ -218,7 +229,7 @@ impl HostTool for YtFetchTranscriptTool {
                     "tags": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Hierarchical topic tags in `kebab-case` (e.g. ['topic/algo-trading/mql5-dca', 'mql5', 'mt5'])"
+                        "description": "Hierarchical topic tags in `kebab-case` (e.g. ['topic/algo-trading/mql5-dca', 'mql5', 'mt5']). Used only when `save_to_sources=true`."
                     }
                 },
                 "additionalProperties": false
@@ -234,6 +245,10 @@ impl HostTool for YtFetchTranscriptTool {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Thiếu hoặc rỗng: video_id"))?
             .to_string();
+        let save_to_sources = args
+            .get("save_to_sources")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let raw_topic_folder = args
             .get("topic_folder")
             .and_then(Value::as_str)
@@ -261,6 +276,55 @@ impl HostTool for YtFetchTranscriptTool {
             (custom_stem, custom_title, 0)
         };
 
+        let youtube_url = format!("https://www.youtube.com/watch?v={video_id}");
+
+        if !save_to_sources {
+            ctx.progress(&format!(
+                "Đang tải transcript bằng yt-dlp cho video `{video_id}` (chế độ chỉ đọc/tóm tắt, không lưu vào sources/)..."
+            ));
+            let work = self.env.work_dir.clone();
+            let langs = self.env.langs.clone();
+            let vid = video_id.clone();
+            let transcript =
+                tokio::task::spawn_blocking(move || fetch_transcript(&work, &vid, &langs))
+                    .await
+                    .map_err(|e| host_tool_err("INTERNAL", e.to_string()))??;
+
+            let char_count = transcript.chars().count();
+            let line_count = transcript.lines().count();
+            let body = clip_transcript(&transcript, READONLY_TRANSCRIPT_MAX_CHARS);
+
+            ctx.progress(&format!(
+                "Đã tải transcript video `{video_id}` ({char_count} ký tự, {line_count} dòng)"
+            ));
+
+            let agent_output = format!(
+                "VIDEO_ID: {video_id}\n\
+                 TITLE: {title}\n\
+                 YOUTUBE_URL: {youtube_url}\n\
+                 SAVED_TO_SOURCES: false\n\
+                 CONTENT_LENGTH_CHARS: {char_count}\n\
+                 CONTENT_LINES: {line_count}\n\n\
+                 === BEGIN TRANSCRIPT ===\n\
+                 {body}\n\
+                 === END TRANSCRIPT ==="
+            );
+
+            return Ok(host_tool_outcome(
+                &ctx,
+                agent_output,
+                json!({
+                    "video_id": video_id,
+                    "title": title,
+                    "youtube_url": youtube_url,
+                    "chars": char_count,
+                    "lines": line_count,
+                    "saved_to_sources": false,
+                    "autoflow_triggered": false
+                }),
+            ));
+        }
+
         let mut tags = Vec::new();
         if let Some(arr) = args.get("tags").and_then(Value::as_array) {
             for item in arr.iter().filter_map(Value::as_str) {
@@ -287,7 +351,6 @@ impl HostTool for YtFetchTranscriptTool {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let youtube_url = format!("https://www.youtube.com/watch?v={video_id}");
         let written = self
             .env
             .engine
@@ -346,6 +409,7 @@ impl HostTool for YtFetchTranscriptTool {
                 "docid": written.info.docid,
                 "chars": written.body_char_count,
                 "lines": written.info.line_count,
+                "saved_to_sources": true,
                 "autoflow_triggered": true
             }),
         ))
