@@ -1,5 +1,5 @@
-//! Example 1: Luồng Voice Agent tạo Task nền trên Flow 2 (`daily_root`) -> `report_stager`
-//! gọi `add_to_sources` -> kích hoạt tự động Managed Auto-Flow Task trên Flow 1 (`wiki_root`).
+//! Example 1: Luồng Voice Agent tạo Task nền trên Flow 1 (`daily_root`) -> `report_stager`
+//! gọi `add_to_sources` -> kích hoạt tự động Managed Auto-Flow Task trên Flow 2 (`wiki_root`).
 //!
 //! Dùng chung thư mục dữ liệu: `target/homelab_shared_workspace`
 //!
@@ -63,7 +63,7 @@ async fn main() -> ExampleResult<()> {
         .to_string();
 
     println!(
-        "\n=== [3. LIVE TASK STREAM (Flow 2 `daily_root` -> `add_to_sources` -> Flow 1 `Autoflow`)] ==="
+        "\n=== [3. LIVE TASK STREAM (Flow 1 `daily_root` -> `add_to_sources` -> Flow 2 `Autoflow`)] ==="
     );
     let mut pending = HashSet::new();
     pending.insert(first_task_id);

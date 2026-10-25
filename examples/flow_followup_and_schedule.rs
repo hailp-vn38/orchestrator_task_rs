@@ -1,4 +1,4 @@
-//! Example 2: Luồng tạo Reminder qua `HostTool` của Flow 2 (`reminder_planner`),
+//! Example 2: Luồng tạo Reminder qua `HostTool` của Flow 1 (`reminder_planner`),
 //! gửi lệnh bồi `Followup` để xuất báo cáo Markdown rời (`reports/`), và kích hoạt
 //! lịch hẹn giờ tự động (`ScheduleTriggered` + `ReminderDue`) có stream trực tiếp.
 //!

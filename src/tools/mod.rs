@@ -34,7 +34,7 @@ pub use pdf::{
     build_sample_technical_pdf, convert_document_with_anydoc, pdf_host_tools, AnydocInspectPdfTool,
     AnydocSaveToSourcesTool, ConvertedPdfDoc, SharedPdfState,
 };
-pub use toolkit::WorkspaceToolKit;
+pub use toolkit::{WorkspaceToolKit, COLLECTOR_TOOL_NAMES};
 pub use web::{
     clean_noise_tags, collapse_ws, decode_html_entities, extract_article, extract_feed_items,
     extract_links, extract_metadata, find_elements, find_open_tags, get_attr,

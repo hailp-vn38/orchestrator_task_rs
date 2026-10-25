@@ -136,7 +136,7 @@ Tuân thủ nguyên tắc:
     │   ├── scheduler.rs               # Vòng lặp Timer/Cron -> bắn Notification hoặc gọi dispatch
     │   ├── autoflow.rs                # Lắng nghe autoflow_notify -> gọi WikiEngine -> tạo Auto-Flow Task
     │   └── event_bus.rs               # Broadcast TaskEvent (TaskCreated, ProgressUpdated, ReminderDue...)
-    └── tools/                         # Dual-Mode Adapter: vừa Raw JSON (Voice) vừa impl HostTool (Flow 2)
+    └── tools/                         # Dual-Mode Adapter: vừa Raw JSON (Voice) vừa impl HostTool (Flow 1)
         ├── mod.rs                     # TaskToolSuite & ToolSpec
         ├── catalog.rs                 # Sinh JSON Schema động nhúng mô tả Agent từ FlowRegistry
         ├── voice_handler.rs           # execute_raw() cho Voice Agent (task_create, task_list, task_cancel...)
@@ -169,5 +169,5 @@ Theo đúng skill [`domain-modeling`](file:///Users/lamphuchai/Desktop/project_r
 Chỉ ghi lại các quyết định có đánh đổi thực sự, khó đảo ngược và cần ngữ cảnh rõ ràng:
 1. **`0001-separate-task-sqlite-store.md`**: Tại sao tách `tasks.db` riêng khỏi `orchestrator.db` và `wiki.db`? (Tránh xung đột migration và write-lock contention với WAL của `Orchestrator`, đồng thời cho phép một `tasks.db` điều phối nhiều instance `Orchestrator` độc lập mà vẫn truy vấn danh sách Task cho UI trong 1 query).
 2. **`0002-two-phase-initialization-for-host-tools.md`**: Tại sao tách khởi tạo thành `TaskManager::prepare` và `TaskManagerInit::start`? (Giải quyết phụ thuộc vòng khi `daily_orch` cần đăng ký và validate `HostTool` lúc `build()`, trước khi `Arc<Orchestrator>` tồn tại để cấp cho `TaskManager`).
-3. **`0003-managed-autoflow-as-first-class-tasks.md`**: Tại sao biến vòng lặp ngầm `autoflow_notify` của Flow 1 thành các bản ghi `Task` chính thức trong `tasks.db`? (Đảm bảo mọi hoạt động gọi LLM tốn chi phí và thay đổi `wiki/` đều hiển thị minh bạch trên UI View Task, có thể theo dõi tiến độ subagent, hủy bỏ và tự động phục hồi sau khi khởi động lại).
-4. **`0004-unified-schedule-and-reminder-model.md`**: Tại sao hợp nhất `ReminderTools` của Flow 2 và bộ lập lịch `Scheduler` vào chung bảng `task_schedules` với phân loại `notify_only` vs `spawn_task`? (Tránh duy trì hai vòng lặp timer và hai bảng SQLite có cùng cấu trúc thời gian/cron/scope; cho phép nâng cấp một lời nhắc nhở thành tác vụ tự động chạy Agent mà không đổi schema).
+3. **`0003-managed-autoflow-as-first-class-tasks.md`**: Tại sao biến vòng lặp ngầm `autoflow_notify` của Flow 2 (`wiki_orch`) thành các bản ghi `Task` chính thức trong `tasks.db`? (Đảm bảo mọi hoạt động gọi LLM tốn chi phí và thay đổi `wiki/` đều hiển thị minh bạch trên UI View Task, có thể theo dõi tiến độ subagent, hủy bỏ và tự động phục hồi sau khi khởi động lại).
+4. **`0004-unified-schedule-and-reminder-model.md`**: Tại sao hợp nhất `ReminderTools` của Flow 1 (`daily_orch`) và bộ lập lịch `Scheduler` vào chung bảng `task_schedules` với phân loại `notify_only` vs `spawn_task`? (Tránh duy trì hai vòng lặp timer và hai bảng SQLite có cùng cấu trúc thời gian/cron/scope; cho phép nâng cấp một lời nhắc nhở thành tác vụ tự động chạy Agent mà không đổi schema).

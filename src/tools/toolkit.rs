@@ -25,6 +25,21 @@ use crate::tools::youtube::{youtube_host_tools, YoutubeCollectorEnv};
 
 const DEFAULT_CONTEXT_LIMIT_TOKENS: usize = 200_000;
 
+/// Danh sách tên 10 `HostTool` thu thập nguồn ngoại vi thuộc Flow 1 (`source_collector`):
+/// `anydoc_*` (PDF), `yt_*` (YouTube Playlist), và `fetch_html`/`html_*` (Web/HTML).
+pub const COLLECTOR_TOOL_NAMES: &[&str] = &[
+    "anydoc_inspect_pdf",
+    "anydoc_save_to_sources",
+    "yt_list_playlist",
+    "yt_fetch_transcript",
+    "fetch_html",
+    "html_extract_metadata",
+    "html_extract_article",
+    "html_extract_feed",
+    "html_extract_links",
+    "html_select_elements",
+];
+
 /// Bộ công cụ hợp nhất ở mức Workspace giúp Host chỉ cần khởi tạo 1 lần và lấy ra các nhóm `HostTool`
 /// để đăng ký vào `OrchestratorBuilder` mà không cần tự viết lại từng adapter.
 #[derive(Clone)]
@@ -232,6 +247,9 @@ impl WorkspaceToolKit {
 
     /// Xuất bộ `HostTool` chuẩn cho **Flow 2 (`wiki_orch` / `wiki_root` — Đường ống Wiki Tự động khi `sources/` có file mới)** khi tách riêng 2 instance `Orchestrator`:
     /// chỉ gồm 14 tool `wiki_*` (đọc + ghi) của `WikiEngine`, hoàn toàn không chứa tool thu thập ngoại vi (`yt_*`, `anydoc_*`, `fetch_html`).
+    ///
+    /// Đây là phương thức đối xứng ngữ nghĩa với [`Self::daily_flow_host_tools`] cho mô hình triển khai 2 `Orchestrator` độc lập.
+    #[inline]
     pub fn wiki_flow_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         self.wiki_host_tools()
     }

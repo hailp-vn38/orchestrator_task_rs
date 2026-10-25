@@ -122,7 +122,7 @@ pub fn wiki_host_tools(
 
 /// Chỉ xuất các `HostTool` ở chế độ `ReadOnly` của `WikiEngine`
 /// (`wiki_tree`, `wiki_query`, `wiki_get`, `wiki_multi_get`, `wiki_metadata`, `wiki_status`,
-/// `wiki_graph_neighbors`, `wiki_lint`, `wiki_schema`) — dùng khi tách riêng `daily_orch` (Flow 2).
+/// `wiki_graph_neighbors`, `wiki_lint`, `wiki_schema`) — dùng khi tách riêng `daily_orch` (Flow 1).
 pub fn wiki_readonly_host_tools(
     engine: Arc<WikiEngine>,
     read_budget: AdaptiveReadBudget,

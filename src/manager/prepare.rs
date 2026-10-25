@@ -54,7 +54,7 @@ impl TaskManagerInit {
     }
 
     /// Xuất 4 `HostTool` (`reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`)
-    /// để đăng ký vào `daily_orch` (Flow 2) trước khi gọi `OrchestratorBuilder::build()`.
+    /// để đăng ký vào `daily_orch` (Flow 1) trước khi gọi `OrchestratorBuilder::build()`.
     pub fn reminder_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
         build_reminder_host_tools(Arc::clone(&self.core))
     }

@@ -49,6 +49,7 @@ mod config;
 mod error;
 mod manager;
 mod owner_lock;
+pub mod prompts;
 mod runtime;
 mod store;
 mod tools;
@@ -57,6 +58,11 @@ mod types;
 pub use config::{TargetAgent, TaskConfig, TaskRuntimeConfig, WorkspaceLayout, DEFAULT_FLOW_ID};
 pub use error::{ErrorCode, TaskError, TaskResult};
 pub use manager::{TaskManager, TaskManagerInit};
+pub use prompts::{
+    DAILY_ROOT_PROMPT, DAILY_SYNTHESIS_STAGING_SKILL, DAILY_TASK_REMINDER_SKILL,
+    MEDIA_CREATOR_PROMPT, REMINDER_PLANNER_PROMPT, REPORT_STAGER_PROMPT, SOURCE_COLLECTOR_PROMPT,
+    WIKI_CURATOR_PROMPT, WIKI_INGESTOR_PROMPT, WIKI_RESEARCHER_PROMPT, WIKI_ROOT_PROMPT,
+};
 pub use runtime::WikiAutoFlowBinding;
 pub use tools::{
     add_to_sources_host_tool, build_sample_technical_pdf, build_tool_specs_for_agents,
@@ -72,7 +78,7 @@ pub use tools::{
     MarkdownCreateTool, MarkdownReadTool, PlaylistVideoEntry, SharedPdfState,
     SynthesizedAudioPayload, TaskToolSpec, TaskToolSuite, TtsSynthesisRequest, TtsSynthesizeTool,
     TtsSynthesizerBackend, WikiEngineBridgeTool, WorkspaceToolKit, YoutubeCollectorEnv,
-    YtFetchTranscriptTool, YtListPlaylistTool, HTML_TOOL_NAMES,
+    YtFetchTranscriptTool, YtListPlaylistTool, COLLECTOR_TOOL_NAMES, HTML_TOOL_NAMES,
 };
 pub use types::{
     AgentCatalogEntry, CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView,

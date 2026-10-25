@@ -15,7 +15,7 @@ use orchestrator_flow_rs::{
     build_sample_technical_pdf, CreateScheduleRequest, CreateTaskRequest, Priority,
     ScheduleActionKind, ScheduleFilter, TaskConfig, TaskEvent, TaskFeedItem, TaskFilter,
     TaskManager, TaskRuntimeConfig, TaskScope, TaskSource, TaskStatus, WikiAutoFlowBinding,
-    WorkspaceLayout, WorkspaceToolKit,
+    WorkspaceLayout, WorkspaceToolKit, COLLECTOR_TOOL_NAMES,
 };
 use serde_json::json;
 use tokio::sync::Notify;
@@ -51,7 +51,7 @@ async fn two_phase_init_voice_catalog_and_task_lifecycle() {
 
     let task_init = TaskManager::prepare(task_cfg).await.unwrap();
 
-    // Xây dựng daily_orch (Flow 2) có đăng ký các reminder HostTool từ Pha 1
+    // Xây dựng daily_orch (Flow 1) có đăng ký các reminder HostTool từ Pha 1
     let daily_gw = ScriptedGateway::new();
     daily_gw.push_text("Báo cáo phân tích đã hoàn tất.");
 
@@ -78,7 +78,7 @@ async fn two_phase_init_voice_catalog_and_task_lifecycle() {
     }
     let daily_orch = Arc::new(daily_builder.build().await.unwrap());
 
-    // Xây dựng wiki_orch (Flow 1)
+    // Xây dựng wiki_orch (Flow 2)
     let wiki_gw = ScriptedGateway::new();
     wiki_gw.push_text("Đã biên dịch xong nguồn mới vào Wiki.");
 
@@ -335,7 +335,7 @@ async fn schedule_reminder_and_managed_autoflow() {
         .unwrap();
     assert_eq!(completed_reminders.len(), 1);
 
-    // 2. Ghi một file mới vào `sources/` và bắn `autoflow_notify` (mô phỏng `add_to_sources` từ Flow 2)
+    // 2. Ghi một file mới vào `sources/` và bắn `autoflow_notify` (mô phỏng `add_to_sources` từ Flow 1)
     let written = engine
         .write_topic_source(WriteTopicSourceRequest {
             topic_folder: "software-architecture/agent-tasks".to_string(),
@@ -680,16 +680,14 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
         .map(|t| t.descriptor().name)
         .collect();
     assert_eq!(wiki_tool_names.len(), toolkit.wiki_host_tools().len());
-    for forbidden in [
-        "yt_list_playlist",
-        "yt_fetch_transcript",
-        "anydoc_inspect_pdf",
-        "anydoc_save_to_sources",
-        "fetch_html",
-    ] {
+    for &collector_tool in COLLECTOR_TOOL_NAMES {
         assert!(
-            !wiki_tool_names.iter().any(|n| n == forbidden),
-            "wiki_flow_host_tools must not include external collector tool '{forbidden}'"
+            daily_tool_names.iter().any(|n| n == collector_tool),
+            "daily_flow_host_tools must include collector tool '{collector_tool}'"
+        );
+        assert!(
+            !wiki_tool_names.iter().any(|n| n == collector_tool),
+            "wiki_flow_host_tools must not include external collector tool '{collector_tool}'"
         );
     }
 

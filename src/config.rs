@@ -76,7 +76,7 @@ impl WorkspaceLayout {
         self.root_dir.join("skills")
     }
 
-    /// Thư mục xuất báo cáo Markdown rời của Flow 2 (`<root>/reports`).
+    /// Thư mục xuất báo cáo Markdown rời của Flow 1 (`<root>/reports`).
     pub fn reports_dir(&self) -> PathBuf {
         self.root_dir.join("reports")
     }

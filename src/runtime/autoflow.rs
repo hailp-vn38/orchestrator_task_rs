@@ -1,6 +1,6 @@
 //! `WikiAutoFlowBinding` & Worker quản lý tiến trình tự động biên dịch/kiểm toán Wiki (ADR-0003).
 //!
-//! Khi nhận tín hiệu `autoflow_notify` (từ `add_to_sources` của Flow 2 hoặc khi nạp file mới vào `sources/`),
+//! Khi nhận tín hiệu `autoflow_notify` (từ `add_to_sources` hoặc `source_collector` của Flow 1 khi nạp file mới vào `sources/`),
 //! Worker gọi `WikiEngine::build_next_autoflow_prompt(None)` và tạo một `Task` chính thức
 //! (`source = TaskSource::Autoflow`) để người dùng theo dõi trực tiếp trên UI View Task.
 //!
