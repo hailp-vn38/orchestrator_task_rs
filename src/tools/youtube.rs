@@ -1,13 +1,14 @@
 //! Bộ công cụ `HostTool` thu thập YouTube Playlist và Transcript bằng `yt-dlp`
 //! (`yt_list_playlist`, `yt_fetch_transcript`) cho subagent `source_collector`.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use llm_wiki::{
     clip_transcript, sanitize_topic_folder, slugify, vtt_to_text, WikiEngine,
-    WriteTopicSourceRequest,
+    WriteTopicSourceRequest, WriteTopicSourceResponse,
 };
 use orchestrator_agent_rs::{
     HostTool, ToolContext, ToolDescriptor, ToolEffect, ToolError, ToolOutcome,
@@ -17,11 +18,10 @@ use tokio::sync::Notify;
 
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
-/// Giới hạn ký tự cho bản xem trước ngắn khi `source_collector` lưu transcript vào `sources/`
-/// (tránh làm đầy context window của `source_collector` khi tải nhiều video liên tiếp).
+/// Giới hạn ký tự cho bản xem trước ngắn khi lưu transcript vào `sources/`.
 const COLLECTOR_PREVIEW_CHARS: usize = 600;
 
-/// Giới hạn ký tự tối đa trả về trực tiếp khi chỉ đọc/tóm tắt transcript (`save_to_sources = false`).
+/// Giới hạn ký tự tối đa trả về trực tiếp khi đọc/tóm tắt transcript (`yt_fetch_transcript`).
 const READONLY_TRANSCRIPT_MAX_CHARS: usize = 32_000;
 
 /// Thông tin một video trong YouTube Playlist đã được liệt kê hoặc tải phụ đề.
@@ -31,12 +31,12 @@ pub struct PlaylistVideoEntry {
     pub id: String,
     pub title: String,
     pub stem: String,
-    /// Đường dẫn tương đối thực tế bên trong `sources/` sau khi `source_collector` phân loại theo chủ đề
+    /// Đường dẫn tương đối thực tế bên trong `sources/` sau khi lưu qua `add_to_sources`
     /// (ví dụ: `Some("algo-trading/mql5-dca/01-....md")`).
     pub saved_source_scoped_path: Option<String>,
 }
 
-/// Môi trường trạng thái dùng chung giữa `YtListPlaylistTool` và `YtFetchTranscriptTool`.
+/// Môi trường trạng thái dùng chung giữa `YtListPlaylistTool`, `YtFetchTranscriptTool` và `AddToSourcesTool`.
 pub struct YoutubeCollectorEnv {
     pub engine: Arc<WikiEngine>,
     pub autoflow_notify: Arc<Notify>,
@@ -45,6 +45,7 @@ pub struct YoutubeCollectorEnv {
     pub limit: usize,
     pub playlist_url: Mutex<String>,
     pub videos: Mutex<Vec<PlaylistVideoEntry>>,
+    pub transcripts: Mutex<HashMap<String, String>>,
 }
 
 impl YoutubeCollectorEnv {
@@ -62,6 +63,7 @@ impl YoutubeCollectorEnv {
             limit: usize::MAX,
             playlist_url: Mutex::new(String::new()),
             videos: Mutex::new(Vec::new()),
+            transcripts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -88,6 +90,117 @@ impl YoutubeCollectorEnv {
     /// Xuất cặp `HostTool` `[yt_list_playlist, yt_fetch_transcript]` gắn với `Arc<YoutubeCollectorEnv>`.
     pub fn host_tools(self: &Arc<Self>) -> Vec<Arc<dyn HostTool>> {
         youtube_host_tools(Arc::clone(self))
+    }
+
+    /// Tải (hoặc lấy từ bộ nhớ đệm) transcript cho `video_id`.
+    pub async fn get_or_fetch_transcript(&self, video_id: &str) -> Result<String, ToolError> {
+        if let Some(cached) = self
+            .transcripts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(video_id)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        let work = self.work_dir.clone();
+        let langs = self.langs.clone();
+        let vid = video_id.to_string();
+        let transcript =
+            tokio::task::spawn_blocking(move || fetch_transcript(&work, &vid, &langs))
+                .await
+                .map_err(|e| host_tool_err("INTERNAL", e.to_string()))??;
+        self.transcripts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(video_id.to_string(), transcript.clone());
+        Ok(transcript)
+    }
+
+    /// Lưu transcript của `video_id` vào `sources/<topic_folder>/<stem>.md` và kích hoạt `autoflow_notify`.
+    pub async fn save_video_to_sources(
+        &self,
+        video_id: &str,
+        raw_topic_folder: &str,
+        custom_title: Option<&str>,
+        custom_stem: Option<&str>,
+        tags: Vec<String>,
+    ) -> Result<WriteTopicSourceResponse, ToolError> {
+        let topic_folder = sanitize_topic_folder(raw_topic_folder);
+        let known_entry = self
+            .videos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|v| v.id == video_id)
+            .cloned();
+
+        let (default_stem, default_title, idx) = if let Some(entry) = known_entry {
+            (entry.stem, entry.title, entry.index)
+        } else {
+            let fallback_title = custom_title
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(video_id)
+                .to_string();
+            let fallback_stem = slugify(&fallback_title, 36);
+            (fallback_stem, fallback_title, 0)
+        };
+
+        let title = custom_title
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&default_title)
+            .to_string();
+        let stem = custom_stem
+            .map(|s| slugify(s, 64))
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_stem);
+
+        let transcript = self.get_or_fetch_transcript(video_id).await?;
+        let playlist_url = self
+            .playlist_url
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let youtube_url = format!("https://www.youtube.com/watch?v={video_id}");
+
+        let written = self
+            .engine
+            .write_topic_source(WriteTopicSourceRequest {
+                topic_folder,
+                file_stem: Some(stem),
+                title,
+                raw_body: transcript,
+                body_heading: Some("Raw Transcript".to_string()),
+                tags,
+                extra_frontmatter: vec![
+                    ("video_id".to_string(), json!(video_id)),
+                    ("youtube_url".to_string(), json!(youtube_url)),
+                    ("playlist_url".to_string(), json!(playlist_url)),
+                    ("playlist_index".to_string(), json!(idx)),
+                ],
+                header_bullets: vec![
+                    ("YouTube URL".to_string(), format!("<{youtube_url}>")),
+                    ("Playlist URL".to_string(), format!("<{playlist_url}>")),
+                    ("Video ID".to_string(), format!("`{video_id}`")),
+                    ("Thứ tự trong Playlist".to_string(), format!("#{idx}")),
+                ],
+                preview_chars: Some(COLLECTOR_PREVIEW_CHARS),
+            })
+            .map_err(|e| host_tool_err("WIKI_SOURCE_WRITE_FAILED", e.to_string()))?;
+
+        if let Some(entry) = self
+            .videos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+            .find(|v| v.id == video_id)
+        {
+            entry.saved_source_scoped_path = Some(written.info.scoped_path.clone());
+        }
+
+        self.autoflow_notify.notify_one();
+        Ok(written)
     }
 }
 
@@ -187,8 +300,8 @@ impl HostTool for YtListPlaylistTool {
     }
 }
 
-/// Công cụ `yt_fetch_transcript`: tải phụ đề/transcript của một video YouTube bằng `yt-dlp`,
-/// lưu vào `sources/<topic_folder>/<file_stem>.md` và kích hoạt `autoflow_notify`.
+/// Công cụ `yt_fetch_transcript`: tải phụ đề/transcript của một video YouTube bằng `yt-dlp` ở chế độ chỉ đọc (`ReadOnly`)
+/// và lưu tạm vào bộ nhớ đệm của `YoutubeCollectorEnv` (nếu cần lưu vào `sources/`, gọi công cụ hợp nhất `add_to_sources`).
 pub struct YtFetchTranscriptTool {
     pub env: Arc<YoutubeCollectorEnv>,
 }
@@ -204,7 +317,7 @@ impl HostTool for YtFetchTranscriptTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "yt_fetch_transcript".to_string(),
-            description: "Download the subtitles/transcript of a YouTube video using yt-dlp. By default (`save_to_sources=false`), returns the full transcript text directly for summarization/Q&A without writing any file to `sources/`. Set `save_to_sources=true` ONLY when the user explicitly asks to save/ingest the video into `sources/` or the Wiki (which saves `sources/<topic_folder>/<file_stem>.md` and triggers Wiki Auto-Flow).".to_string(),
+            description: "Read-only tool: download and return the subtitles/transcript of a YouTube video using yt-dlp for summarization or Q&A. Does NOT write any file to `sources/`. (If the user explicitly asks to save the video into `sources/` or the Wiki, call `add_to_sources` with `video_id`).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["video_id"],
@@ -213,28 +326,14 @@ impl HostTool for YtFetchTranscriptTool {
                         "type": "string",
                         "description": "YouTube video ID from `yt_list_playlist` or URL"
                     },
-                    "save_to_sources": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Default `false`. Keep `false` (or omit) when only summarizing/reading a video so NO Markdown file is written to `sources/`. Set to `true` ONLY when the user explicitly requests saving/adding the video to `sources/` or the Wiki."
-                    },
-                    "topic_folder": {
-                        "type": "string",
-                        "description": "Topic folder path inside `sources/` in `kebab-case` (max 2 levels `<domain>/<topic>`, e.g. 'algo-trading/mql5-dca' or 'ai-engineering/rag'). Used only when `save_to_sources=true`."
-                    },
                     "title": {
                         "type": "string",
-                        "description": "Video title from `yt_list_playlist`"
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Hierarchical topic tags in `kebab-case` (e.g. ['topic/algo-trading/mql5-dca', 'mql5', 'mt5']). Used only when `save_to_sources=true`."
+                        "description": "Optional video title from `yt_list_playlist`"
                     }
                 },
                 "additionalProperties": false
             }),
-            effect: ToolEffect::Mutating,
+            effect: ToolEffect::ReadOnly,
         }
     }
 
@@ -245,15 +344,6 @@ impl HostTool for YtFetchTranscriptTool {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Thiếu hoặc rỗng: video_id"))?
             .to_string();
-        let save_to_sources = args
-            .get("save_to_sources")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let raw_topic_folder = args
-            .get("topic_folder")
-            .and_then(Value::as_str)
-            .unwrap_or("general");
-        let topic_folder = sanitize_topic_folder(raw_topic_folder);
 
         let known_entry = self
             .env
@@ -264,153 +354,52 @@ impl HostTool for YtFetchTranscriptTool {
             .find(|v| v.id == video_id)
             .cloned();
 
-        let (stem, title, idx) = if let Some(entry) = known_entry {
-            (entry.stem, entry.title, entry.index)
+        let title = if let Some(entry) = known_entry {
+            entry.title
         } else {
-            let custom_title = args
-                .get("title")
+            args.get("title")
                 .and_then(Value::as_str)
                 .unwrap_or(&video_id)
-                .to_string();
-            let custom_stem = slugify(&custom_title, 36);
-            (custom_stem, custom_title, 0)
+                .to_string()
         };
 
         let youtube_url = format!("https://www.youtube.com/watch?v={video_id}");
 
-        if !save_to_sources {
-            ctx.progress(&format!(
-                "Đang tải transcript bằng yt-dlp cho video `{video_id}` (chế độ chỉ đọc/tóm tắt, không lưu vào sources/)..."
-            ));
-            let work = self.env.work_dir.clone();
-            let langs = self.env.langs.clone();
-            let vid = video_id.clone();
-            let transcript =
-                tokio::task::spawn_blocking(move || fetch_transcript(&work, &vid, &langs))
-                    .await
-                    .map_err(|e| host_tool_err("INTERNAL", e.to_string()))??;
+        ctx.progress(&format!(
+            "Đang tải transcript bằng yt-dlp cho video `{video_id}` (chế độ ReadOnly)..."
+        ));
+        let transcript = self.env.get_or_fetch_transcript(&video_id).await?;
 
-            let char_count = transcript.chars().count();
-            let line_count = transcript.lines().count();
-            let body = clip_transcript(&transcript, READONLY_TRANSCRIPT_MAX_CHARS);
-
-            ctx.progress(&format!(
-                "Đã tải transcript video `{video_id}` ({char_count} ký tự, {line_count} dòng)"
-            ));
-
-            let agent_output = format!(
-                "VIDEO_ID: {video_id}\n\
-                 TITLE: {title}\n\
-                 YOUTUBE_URL: {youtube_url}\n\
-                 SAVED_TO_SOURCES: false\n\
-                 CONTENT_LENGTH_CHARS: {char_count}\n\
-                 CONTENT_LINES: {line_count}\n\n\
-                 === BEGIN TRANSCRIPT ===\n\
-                 {body}\n\
-                 === END TRANSCRIPT ==="
-            );
-
-            return Ok(host_tool_outcome(
-                &ctx,
-                agent_output,
-                json!({
-                    "video_id": video_id,
-                    "title": title,
-                    "youtube_url": youtube_url,
-                    "chars": char_count,
-                    "lines": line_count,
-                    "saved_to_sources": false,
-                    "autoflow_triggered": false
-                }),
-            ));
-        }
-
-        let mut tags = Vec::new();
-        if let Some(arr) = args.get("tags").and_then(Value::as_array) {
-            for item in arr.iter().filter_map(Value::as_str) {
-                let clean_tag = item.trim().to_string();
-                if !clean_tag.is_empty() && !tags.contains(&clean_tag) {
-                    tags.push(clean_tag);
-                }
-            }
-        }
+        let char_count = transcript.chars().count();
+        let line_count = transcript.lines().count();
+        let body = clip_transcript(&transcript, READONLY_TRANSCRIPT_MAX_CHARS);
 
         ctx.progress(&format!(
-            "Đang tải transcript bằng yt-dlp cho video `{video_id}` -> `sources/{topic_folder}/{stem}.md`..."
+            "Đã tải transcript video `{video_id}` ({char_count} ký tự, {line_count} dòng)"
         ));
-        let work = self.env.work_dir.clone();
-        let langs = self.env.langs.clone();
-        let vid = video_id.clone();
-        let transcript = tokio::task::spawn_blocking(move || fetch_transcript(&work, &vid, &langs))
-            .await
-            .map_err(|e| host_tool_err("INTERNAL", e.to_string()))??;
 
-        let playlist_url = self
-            .env
-            .playlist_url
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let written = self
-            .env
-            .engine
-            .write_topic_source(WriteTopicSourceRequest {
-                topic_folder: topic_folder.clone(),
-                file_stem: Some(stem),
-                title: title.clone(),
-                raw_body: transcript,
-                body_heading: Some("Raw Transcript".to_string()),
-                tags,
-                extra_frontmatter: vec![
-                    ("video_id".to_string(), json!(video_id)),
-                    ("youtube_url".to_string(), json!(youtube_url)),
-                    ("playlist_url".to_string(), json!(playlist_url)),
-                    ("playlist_index".to_string(), json!(idx)),
-                ],
-                header_bullets: vec![
-                    ("YouTube URL".to_string(), format!("<{youtube_url}>")),
-                    ("Playlist URL".to_string(), format!("<{playlist_url}>")),
-                    ("Video ID".to_string(), format!("`{video_id}`")),
-                    ("Thứ tự trong Playlist".to_string(), format!("#{idx}")),
-                ],
-                preview_chars: Some(COLLECTOR_PREVIEW_CHARS),
-            })
-            .map_err(|e| host_tool_err("WIKI_SOURCE_WRITE_FAILED", e.to_string()))?;
-
-        if let Some(entry) = self
-            .env
-            .videos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter_mut()
-            .find(|v| v.id == video_id)
-        {
-            entry.saved_source_scoped_path = Some(written.info.scoped_path.clone());
-        }
-
-        // Báo tín hiệu cho Auto-Flow Worker của TaskManager (Worker sẽ tự đợi Task thu thập hoàn tất rồi chạy Ingest)
-        self.env.autoflow_notify.notify_one();
-
-        ctx.progress(&format!(
-            "Đã lưu Raw Source theo chủ đề `{}` ({} ký tự, {} dòng, docid: {})",
-            written.info.rel_path,
-            written.body_char_count,
-            written.info.line_count,
-            written.info.docid
-        ));
+        let agent_output = format!(
+            "VIDEO_ID: {video_id}\n\
+             TITLE: {title}\n\
+             YOUTUBE_URL: {youtube_url}\n\
+             CONTENT_LENGTH_CHARS: {char_count}\n\
+             CONTENT_LINES: {line_count}\n\n\
+             === BEGIN TRANSCRIPT ===\n\
+             {body}\n\
+             === END TRANSCRIPT ==="
+        );
 
         Ok(host_tool_outcome(
             &ctx,
-            written.agent_output,
+            agent_output,
             json!({
-                "source_rel_path": written.info.scoped_path,
-                "vault_rel_path": written.info.rel_path,
-                "topic_folder": written.topic_folder,
-                "docid": written.info.docid,
-                "chars": written.body_char_count,
-                "lines": written.info.line_count,
-                "saved_to_sources": true,
-                "autoflow_triggered": true
+                "video_id": video_id,
+                "title": title,
+                "youtube_url": youtube_url,
+                "chars": char_count,
+                "lines": line_count,
+                "saved_to_sources": false,
+                "autoflow_triggered": false
             }),
         ))
     }

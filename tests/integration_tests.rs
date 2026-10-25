@@ -634,10 +634,10 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
         .with_youtube_options("en,vi", 10);
 
     // Kiểm tra các nhóm tool xuất ra từ WorkspaceToolKit
-    assert_eq!(toolkit.pdf_host_tools().len(), 2);
+    assert_eq!(toolkit.pdf_host_tools().len(), 1);
     assert_eq!(toolkit.youtube_host_tools().len(), 2);
     assert_eq!(toolkit.web_host_tools().len(), 6);
-    assert_eq!(toolkit.collector_host_tools().len(), 10);
+    assert_eq!(toolkit.collector_host_tools().len(), 9);
     assert_eq!(toolkit.report_host_tools().len(), 2);
     assert!(!toolkit.wiki_readonly_host_tools().is_empty());
     assert!(toolkit.wiki_host_tools().len() > toolkit.wiki_readonly_host_tools().len());
@@ -653,7 +653,6 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
         "yt_list_playlist",
         "yt_fetch_transcript",
         "anydoc_inspect_pdf",
-        "anydoc_save_to_sources",
         "fetch_html",
         "add_to_sources",
         "markdown_create",
@@ -742,9 +741,9 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
             ),
             (
                 "c4",
-                "anydoc_save_to_sources",
+                "add_to_sources",
                 json!({
-                    "doc_index": 1,
+                    "pdf_doc_index": 1,
                     "topic_folder": "ai-engineering/hybrid-search",
                     "title": "Hybrid Search Technical PDF",
                     "tags": ["topic/ai-engineering/hybrid-search", "pdf"]
@@ -773,7 +772,6 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
             "markdown_create",
             "markdown_read",
             "anydoc_inspect_pdf",
-            "anydoc_save_to_sources",
             "fetch_html",
             "html_extract_article",
             "add_to_sources",

@@ -157,6 +157,8 @@ pub fn wiki_readonly_host_tools(
 pub struct AddToSourcesTool {
     pub engine: Arc<WikiEngine>,
     pub autoflow_notify: Arc<Notify>,
+    pub yt_env: Option<Arc<crate::tools::youtube::YoutubeCollectorEnv>>,
+    pub pdf_state: Option<Arc<crate::tools::pdf::SharedPdfState>>,
 }
 
 const MIN_SOURCE_SUBSTANCE_CHARS: usize = 20;
@@ -246,7 +248,22 @@ impl AddToSourcesTool {
         Self {
             engine,
             autoflow_notify,
+            yt_env: None,
+            pdf_state: None,
         }
+    }
+
+    pub fn with_youtube_env(
+        mut self,
+        yt_env: Arc<crate::tools::youtube::YoutubeCollectorEnv>,
+    ) -> Self {
+        self.yt_env = Some(yt_env);
+        self
+    }
+
+    pub fn with_pdf_state(mut self, pdf_state: Arc<crate::tools::pdf::SharedPdfState>) -> Self {
+        self.pdf_state = Some(pdf_state);
+        self
     }
 
     pub fn into_host_tool(self) -> Arc<dyn HostTool> {
@@ -267,14 +284,30 @@ impl HostTool for AddToSourcesTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "add_to_sources".to_string(),
-            description: "Stage a synthesized Markdown document into `sources/<domain>/<topic>/<slug>.md` (with provenance, conflict & open-question guardrails) and immediately trigger the Flow 2 background Wiki compiler (`autoflow_notify`).".to_string(),
+            description: "Unified tool to save a raw or synthesized Markdown source into `sources/<domain>/<topic>/<slug>.md` and trigger Flow 2 Wiki compilation (`autoflow_notify`). ONLY call this tool when the user EXPLICITLY requests saving/adding content into `sources/` or the Wiki. Supports saving: (1) a YouTube video transcript via `video_id`, (2) a converted PDF/Office document via `pdf_doc_index` or `pdf_path`, or (3) a Web article / synthesized discussion via `title` + `markdown_body`.".to_string(),
             input_schema: json!({
                 "type": "object",
-                "required": ["topic_folder", "title", "markdown_body"],
+                "required": ["topic_folder"],
                 "properties": {
                     "topic_folder": {
                         "type": "string",
-                        "description": "Two-level kebab-case folder '<domain>/<topic>' inside sources/ (e.g. 'software-architecture/agent-tasks')."
+                        "description": "Two-level kebab-case folder '<domain>/<topic>' inside sources/ (e.g. 'software-architecture/agent-tasks' or 'robotics/xgo-duck')."
+                    },
+                    "video_id": {
+                        "type": "string",
+                        "description": "Optional YouTube `video_id` from `yt_list_playlist` / `yt_fetch_transcript`. When provided, saves the full video transcript directly into `sources/<topic_folder>/` without needing `markdown_body`."
+                    },
+                    "pdf_doc_index": {
+                        "type": "integer",
+                        "description": "Optional 1-based `doc_index` from `anydoc_inspect_pdf` (or `doc_index`). When provided, saves the full `anydoc`-converted PDF Markdown directly into `sources/<topic_folder>/` without needing `markdown_body`."
+                    },
+                    "doc_index": {
+                        "type": "integer",
+                        "description": "Alias for `pdf_doc_index` (1-based document index from `anydoc_inspect_pdf`)."
+                    },
+                    "pdf_path": {
+                        "type": "string",
+                        "description": "Optional path to a PDF/Office file on disk to convert with `anydoc` and save directly into `sources/<topic_folder>/`."
                     },
                     "file_stem": {
                         "type": "string",
@@ -282,16 +315,16 @@ impl HostTool for AddToSourcesTool {
                     },
                     "title": {
                         "type": "string",
-                        "description": "Document title."
+                        "description": "Document title (required when saving `markdown_body`; optional override when saving `video_id` or `pdf_doc_index`/`pdf_path`)."
                     },
                     "markdown_body": {
                         "type": "string",
-                        "description": "Self-contained Markdown synthesis body (>= 20 non-whitespace chars, free of secrets/prompt injection)."
+                        "description": "Self-contained Markdown body (>= 20 non-whitespace chars, free of secrets/prompt injection). Required when saving Web articles or synthesized discussions (omit when using `video_id` or `pdf_doc_index`/`pdf_path`)."
                     },
                     "tags": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Hierarchical tags."
+                        "description": "Hierarchical tags in kebab-case (e.g. ['topic/robotics/xgo-duck', 'robotics'])."
                     },
                     "provenance": {
                         "type": "string",
@@ -324,28 +357,6 @@ impl HostTool for AddToSourcesTool {
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing topic_folder"))?;
-        let title = args
-            .get("title")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing title"))?;
-        let body = args
-            .get("markdown_body")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing markdown_body"))?;
-
-        let provenance =
-            normalize_and_validate_provenance(args.get("provenance").and_then(Value::as_str))?;
-        validate_source_content_safety(title, body)?;
-
-        let topic_folder = sanitize_topic_folder(raw_topic);
-        let file_stem = args
-            .get("file_stem")
-            .and_then(Value::as_str)
-            .map(|s| slugify(s, 64))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| slugify(title, 64));
         let tags: Vec<String> = args
             .get("tags")
             .and_then(Value::as_array)
@@ -357,6 +368,119 @@ impl HostTool for AddToSourcesTool {
                     .collect()
             })
             .unwrap_or_default();
+        let custom_title = args
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let custom_stem = args
+            .get("file_stem")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        // Nhánh 1: Lưu transcript video YouTube (`video_id`)
+        if let Some(video_id) = args
+            .get("video_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let yt_env = self.yt_env.as_ref().ok_or_else(|| {
+                host_tool_err(
+                    "YOUTUBE_ENV_UNAVAILABLE",
+                    "YoutubeCollectorEnv chưa được gắn vào AddToSourcesTool",
+                )
+            })?;
+            ctx.progress(&format!(
+                "Đang lưu transcript video YouTube `{video_id}` vào `sources/{raw_topic}/`..."
+            ));
+            let written = yt_env
+                .save_video_to_sources(video_id, raw_topic, custom_title, custom_stem, tags)
+                .await?;
+            return Ok(host_tool_outcome(
+                &ctx,
+                written.agent_output,
+                json!({
+                    "source_rel_path": written.info.scoped_path,
+                    "vault_rel_path": written.info.rel_path,
+                    "topic_folder": written.topic_folder,
+                    "docid": written.info.docid,
+                    "chars": written.body_char_count,
+                    "lines": written.info.line_count,
+                    "origin": "youtube",
+                    "video_id": video_id,
+                    "autoflow_triggered": true,
+                }),
+            ));
+        }
+
+        // Nhánh 2: Lưu tài liệu PDF/Office (`pdf_doc_index` / `doc_index` / `pdf_path`)
+        let pdf_idx = args
+            .get("pdf_doc_index")
+            .or_else(|| args.get("doc_index"))
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
+        let pdf_path = args
+            .get("pdf_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        if pdf_idx.is_some() || pdf_path.is_some() {
+            let pdf_state = self.pdf_state.as_ref().ok_or_else(|| {
+                host_tool_err(
+                    "PDF_STATE_UNAVAILABLE",
+                    "SharedPdfState chưa được gắn vào AddToSourcesTool",
+                )
+            })?;
+            ctx.progress(&format!(
+                "Đang lưu tài liệu PDF vào `sources/{raw_topic}/`..."
+            ));
+            let written = pdf_state
+                .save_doc_to_sources(
+                    pdf_idx,
+                    pdf_path,
+                    custom_stem,
+                    raw_topic,
+                    custom_title,
+                    tags,
+                )
+                .await?;
+            return Ok(host_tool_outcome(
+                &ctx,
+                written.agent_output,
+                json!({
+                    "source_rel_path": written.info.scoped_path,
+                    "vault_rel_path": written.info.rel_path,
+                    "topic_folder": written.topic_folder,
+                    "docid": written.info.docid,
+                    "chars": written.body_char_count,
+                    "lines": written.info.line_count,
+                    "origin": "pdf",
+                    "autoflow_triggered": true,
+                }),
+            ));
+        }
+
+        // Nhánh 3: Lưu Markdown trực tiếp (`title` + `markdown_body`)
+        let title = custom_title
+            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing title"))?;
+        let body = args
+            .get("markdown_body")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing markdown_body (or provide video_id / pdf_doc_index / pdf_path)"))?;
+
+        let provenance =
+            normalize_and_validate_provenance(args.get("provenance").and_then(Value::as_str))?;
+        validate_source_content_safety(title, body)?;
+
+        let topic_folder = sanitize_topic_folder(raw_topic);
+        let file_stem = custom_stem
+            .map(|s| slugify(s, 64))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| slugify(title, 64));
 
         let target_hint = args
             .get("target_hint")

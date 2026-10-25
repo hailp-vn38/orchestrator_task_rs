@@ -18,18 +18,16 @@ use crate::tools::media_artifacts::{
 };
 use crate::tools::pdf::{pdf_host_tools, SharedPdfState};
 use crate::tools::web::{web_host_tools, HtmlWorkspace};
-use crate::tools::wiki_bridge::{
-    add_to_sources_host_tool, wiki_host_tools, wiki_readonly_host_tools,
-};
+use crate::tools::wiki_bridge::{AddToSourcesTool, wiki_host_tools, wiki_readonly_host_tools};
 use crate::tools::youtube::{youtube_host_tools, YoutubeCollectorEnv};
 
 const DEFAULT_CONTEXT_LIMIT_TOKENS: usize = 200_000;
 
-/// Danh sách tên 10 `HostTool` thu thập nguồn ngoại vi thuộc Flow 1 (`source_collector`):
-/// `anydoc_*` (PDF), `yt_*` (YouTube Playlist), và `fetch_html`/`html_*` (Web/HTML).
+/// Danh sách tên 9 `HostTool` chỉ đọc (`ReadOnly`) để kiểm tra/trích xuất nguồn ngoại vi thuộc Flow 1 (`source_collector`):
+/// `anydoc_inspect_pdf` (PDF), `yt_list_playlist` / `yt_fetch_transcript` (YouTube), và `fetch_html`/`html_*` (Web/HTML).
+/// Việc lưu vào `sources/` được thực hiện thống nhất qua công cụ duy nhất `add_to_sources`.
 pub const COLLECTOR_TOOL_NAMES: &[&str] = &[
     "anydoc_inspect_pdf",
-    "anydoc_save_to_sources",
     "yt_list_playlist",
     "yt_fetch_transcript",
     "fetch_html",
@@ -187,9 +185,13 @@ impl WorkspaceToolKit {
         wiki_readonly_host_tools(Arc::clone(&self.engine), self.read_budget)
     }
 
-    /// Xuất `HostTool` `add_to_sources`.
+    /// Xuất `HostTool` `add_to_sources` hợp nhất (gắn kèm `yt_env` và `pdf_state` để hỗ trợ lưu cả YouTube, PDF và Markdown tổng hợp).
     pub fn add_to_sources_host_tool(&self) -> Arc<dyn HostTool> {
-        add_to_sources_host_tool(Arc::clone(&self.engine), Arc::clone(&self.autoflow_notify))
+        Arc::new(
+            AddToSourcesTool::new(Arc::clone(&self.engine), Arc::clone(&self.autoflow_notify))
+                .with_youtube_env(Arc::clone(&self.yt_env))
+                .with_pdf_state(Arc::clone(&self.pdf_state)),
+        )
     }
 
     /// Xuất cặp `HostTool` `[markdown_create, markdown_read]`.

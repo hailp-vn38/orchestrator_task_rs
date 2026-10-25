@@ -177,7 +177,6 @@ impl HomelabExampleApp {
                 .with_allowed_tools([
                     "skill",
                     "anydoc_inspect_pdf",
-                    "anydoc_save_to_sources",
                     "yt_list_playlist",
                     "yt_fetch_transcript",
                     "fetch_html",
