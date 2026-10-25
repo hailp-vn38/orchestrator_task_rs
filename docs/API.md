@@ -796,7 +796,7 @@ pub enum TaskEvent {
 | Biến thể `TaskEvent` | Giá trị `"type"` JSON | Khi nào phát sinh |
 | --- | --- | --- |
 | `TaskCreated` | `"task_created"` | Ngay sau khi Task mới được tạo trong `tasks.db` (từ User, Voice, Schedule hoặc Auto-Flow). |
-| `TaskProgress` | `"task_progress"` | Khi Watcher nhận được `tool.started` (kèm tên subagent/tool đang chạy) hoặc `tool.progress` từ `Orchestrator`. |
+| `TaskProgress` | `"task_progress"` | Khi Watcher nhận được `message.committed` (có `text` khác rỗng), `tool.started` (kèm tên subagent/tool đang chạy), `tool.progress` hoặc `tool.completed` từ `Orchestrator`. |
 | `TaskExecutionStream` | `"task_execution_stream"` | Chuyển tiếp nguyên vẹn mọi `ExecutionEvent` từ `Orchestrator` (`text.delta`, `step.started`, `tool.started`, `tool.completed`, `run.completed`, ...) kèm `task_id` và `flow_id`. |
 | `TaskTerminal` | `"task_terminal"` | Khi Task chuyển sang trạng thái kết thúc (`Completed`, `Failed`, `Cancelled`, `Interrupted`) và không còn Followup nào đang chờ. |
 | `TaskDeleted` | `"task_deleted"` | Khi Task bị xóa vĩnh viễn qua `delete_task`, `delete_task_scoped` hoặc tool `task_delete` (kèm `session_id` đã dọn dẹp). |

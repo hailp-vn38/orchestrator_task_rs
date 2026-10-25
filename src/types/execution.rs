@@ -236,6 +236,37 @@ impl TaskAgentSessionView {
                 .collect(),
         }
     }
+
+    /// Trả về nội dung `text` (đã kiểm tra khác rỗng) của message `assistant` đính kèm `tool_call_id`.
+    pub fn invocation_assistant_text(&self, tool_call_id: &str) -> Option<&str> {
+        self.recent_messages
+            .iter()
+            .find(|m| {
+                m.role == "assistant"
+                    && !m.text.trim().is_empty()
+                    && m.tool_calls.iter().any(|tc| tc.call_id == tool_call_id)
+            })
+            .map(|m| m.text.as_str())
+    }
+
+    /// Trả về nội dung `text` của message `assistant` kết thúc lượt chạy `completed` mới nhất
+    /// (không có `tool_calls` và khớp `run_id` của `latest_run` theo chuẩn `docs/17` §17.6).
+    pub fn final_assistant_text(&self) -> Option<&str> {
+        let run = self.latest_run.as_ref()?;
+        if run.status != "completed" {
+            return None;
+        }
+        self.recent_messages
+            .iter()
+            .rev()
+            .find(|m| {
+                m.role == "assistant"
+                    && m.tool_calls.is_empty()
+                    && !m.text.trim().is_empty()
+                    && m.run_id.as_deref() == Some(run.run_id.as_str())
+            })
+            .map(|m| m.text.as_str())
+    }
 }
 
 /// Số liệu và trạng thái của lượt chạy (run attempt) mới nhất trên một Agent session.

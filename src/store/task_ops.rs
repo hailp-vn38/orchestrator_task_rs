@@ -21,6 +21,7 @@ pub(crate) struct NewTaskRow {
     pub related_wiki_links: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct ProgressUpdate<'a> {
     pub active_subagent: Option<&'a str>,
     pub active_tool: Option<&'a str>,

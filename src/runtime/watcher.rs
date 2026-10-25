@@ -111,29 +111,17 @@ async fn run_task_watcher(core: Arc<SharedTaskCore>, initial_task: TaskView) {
 async fn emit_task_progress(
     core: &SharedTaskCore,
     task: &TaskView,
-    active_subagent: Option<&str>,
-    active_tool: Option<&str>,
-    summary: String,
+    update: ProgressUpdate<'_>,
 ) {
-    let _ = core
-        .store
-        .update_task_progress(
-            &task.id,
-            ProgressUpdate {
-                active_subagent,
-                active_tool,
-                progress_summary: Some(&summary),
-            },
-        )
-        .await;
+    let _ = core.store.update_task_progress(&task.id, update).await;
     core.event_bus.emit(TaskEvent::TaskProgress {
         task_id: task.id.clone(),
         owner_id: task.owner_id.clone(),
         workspace_id: task.workspace_id.clone(),
         status: TaskStatus::Running,
-        active_subagent: active_subagent.map(str::to_string),
-        active_tool: active_tool.map(str::to_string),
-        progress_summary: Some(summary),
+        active_subagent: update.active_subagent.map(str::to_string),
+        active_tool: update.active_tool.map(str::to_string),
+        progress_summary: update.progress_summary.map(str::to_string),
         timestamp_ms: now_ms(),
     });
 }
@@ -152,6 +140,7 @@ async fn handle_execution_event(
             event_type: ev.event_type.clone(),
             session_id: ev.session_id.clone(),
             root_session_id: ev.root_session_id.clone(),
+            state_revision: ev.state_revision,
             payload: ev.payload.clone(),
             timestamp_ms: ev.timestamp_ms,
         });
@@ -166,7 +155,16 @@ async fn handle_execution_event(
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
             {
-                emit_task_progress(core, task, None, None, text.to_string()).await;
+                emit_task_progress(
+                    core,
+                    task,
+                    ProgressUpdate {
+                        active_subagent: None,
+                        active_tool: None,
+                        progress_summary: Some(text),
+                    },
+                )
+                .await;
             }
             false
         }
@@ -196,12 +194,30 @@ async fn handle_execution_event(
                 format!("Running tool '{tool_name}'...")
             };
 
-            emit_task_progress(core, task, subagent, Some(tool_name), summary).await;
+            emit_task_progress(
+                core,
+                task,
+                ProgressUpdate {
+                    active_subagent: subagent,
+                    active_tool: Some(tool_name),
+                    progress_summary: Some(&summary),
+                },
+            )
+            .await;
             false
         }
         "tool.progress" => {
             if let Some(msg) = ev.payload.get("message").and_then(|v| v.as_str()) {
-                emit_task_progress(core, task, None, None, msg.to_string()).await;
+                emit_task_progress(
+                    core,
+                    task,
+                    ProgressUpdate {
+                        active_subagent: None,
+                        active_tool: None,
+                        progress_summary: Some(msg),
+                    },
+                )
+                .await;
             }
             false
         }
@@ -212,7 +228,16 @@ async fn handle_execution_event(
                 .and_then(|v| v.as_str())
                 .unwrap_or("tool");
             let summary = format!("Completed tool '{tool_name}'");
-            emit_task_progress(core, task, None, None, summary).await;
+            emit_task_progress(
+                core,
+                task,
+                ProgressUpdate {
+                    active_subagent: None,
+                    active_tool: None,
+                    progress_summary: Some(&summary),
+                },
+            )
+            .await;
             false
         }
         "run.completed" | "run.failed" | "run.cancelled" | "run.interrupted" => {

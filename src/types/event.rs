@@ -32,6 +32,8 @@ pub enum TaskEvent {
         event_type: String,
         session_id: String,
         root_session_id: String,
+        #[serde(default)]
+        state_revision: Option<i64>,
         payload: serde_json::Value,
         timestamp_ms: i64,
     },
