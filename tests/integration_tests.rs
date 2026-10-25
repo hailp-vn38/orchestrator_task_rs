@@ -1549,3 +1549,106 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
     task_mgr.shutdown().await.unwrap();
     orch.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn watcher_emits_task_progress_for_message_committed_and_tool_completed() {
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a helpful test agent.").unwrap();
+
+    let task_cfg = TaskConfig::new(dir.path().join("task_store")).with_default_agent("daily_root");
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "Đang kiểm tra danh sách nhắc nhở hiện tại trước khi tổng hợp.",
+        vec![("call_rem_list", "reminder_list", json!({}))],
+    );
+    gw.push_text("Đã kiểm tra xong, hiện chưa có nhắc nhở nào.");
+
+    let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily root")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["reminder_list"]);
+
+    let mut builder = Orchestrator::builder(OrchestratorConfig::new(
+        test_llm_config(),
+        vec![daily_agent],
+        dir.path().join("orch_store"),
+    ))
+    .with_gateway(gw);
+    for tool in task_init.reminder_host_tools() {
+        builder = builder.register_tool(tool);
+    }
+    let orch = Arc::new(builder.build().await.unwrap());
+    let task_mgr = task_init
+        .with_orchestrator(orch.clone())
+        .start()
+        .await
+        .unwrap();
+
+    let mut sub = task_mgr.subscribe().unwrap();
+    let task = task_mgr
+        .create_task(CreateTaskRequest::new(
+            "Kiểm tra nhắc nhở",
+            "Kiểm tra danh sách nhắc nhở",
+        ))
+        .await
+        .unwrap();
+
+    let mut progress_summaries = Vec::new();
+    let mut committed_texts = Vec::new();
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_secs(3), sub.recv()).await {
+            Ok(Some(TaskFeedItem::Event(ev))) => match ev {
+                TaskEvent::TaskProgress {
+                    task_id,
+                    progress_summary: Some(summary),
+                    ..
+                } if task_id == task.id => {
+                    progress_summaries.push(summary);
+                }
+                TaskEvent::TaskExecutionStream {
+                    task_id,
+                    event_type,
+                    payload,
+                    ..
+                } if task_id == task.id && event_type == "message.committed" => {
+                    if let Some(t) = payload["text"].as_str() {
+                        committed_texts.push(t.to_string());
+                    }
+                }
+                TaskEvent::TaskTerminal { task: t } if t.id == task.id => {
+                    assert_eq!(t.status, TaskStatus::Completed);
+                    break;
+                }
+                _ => {}
+            },
+            _ => break,
+        }
+    }
+
+    assert_eq!(
+        committed_texts,
+        vec![
+            "Đang kiểm tra danh sách nhắc nhở hiện tại trước khi tổng hợp.".to_string(),
+            "Đã kiểm tra xong, hiện chưa có nhắc nhở nào.".to_string(),
+        ]
+    );
+    assert!(
+        progress_summaries
+            .iter()
+            .any(|s| s == "Đang kiểm tra danh sách nhắc nhở hiện tại trước khi tổng hợp."),
+        "expected message.committed text in TaskProgress, got: {progress_summaries:?}"
+    );
+    assert!(
+        progress_summaries
+            .iter()
+            .any(|s| s == "Completed tool 'reminder_list'"),
+        "expected tool.completed summary in TaskProgress, got: {progress_summaries:?}"
+    );
+
+    task_mgr.shutdown().await.unwrap();
+    orch.shutdown().await.unwrap();
+}

@@ -88,6 +88,17 @@ impl TaskStreamPrinter {
                     }
                     let _ = write!(out, "{delta}");
                     let _ = out.flush();
+                } else if event_type == "message.committed" {
+                    if self.last_delta_tag.is_some() {
+                        self.break_delta_line(&mut out);
+                    } else if let Some(text) = payload["text"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                    {
+                        let tag_key = format!("{}:{}", short_id(task_id), role_tag);
+                        let _ = writeln!(out, "[{elapsed_s:6.2}s] 💬 [{tag_key}] {text}");
+                    }
                 } else if event_type == "tool.started" {
                     self.break_delta_line(&mut out);
                     let tool = payload["tool_name"].as_str().unwrap_or("?");
