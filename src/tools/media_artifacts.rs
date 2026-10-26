@@ -1,4 +1,4 @@
-//! Bộ công cụ `HostTool` đa phương tiện & đa định dạng cho Subagent (`image_create`, `tts_synthesize`, `artifact_create`)
+//! Bộ công cụ `HostTool` đa phương tiện & đa định dạng cho Subagent (`image_create`, `video_create`, `tts_synthesize`, `artifact_create`)
 //! xuất bản trực tiếp vào `ArtifactStore` (`ctx.artifacts().put(...)`) của `Orchestrator` và hiển thị
 //! dưới dạng [`TaskArtifactView`] trong `TaskManager`.
 
@@ -117,6 +117,73 @@ impl ImageGeneratorBackend for DefaultImageGeneratorBackend {
             width: render_w,
             height: render_h,
             provider: "builtin_png_renderer".to_string(),
+        })
+    }
+}
+
+/// Yêu cầu sinh video gửi tới [`VideoGeneratorBackend`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoGenerationRequest {
+    pub prompt: String,
+    pub title: Option<String>,
+    pub filename: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_secs: u32,
+}
+
+/// Kết quả video sinh ra từ [`VideoGeneratorBackend`].
+#[derive(Debug, Clone)]
+pub struct GeneratedVideoPayload {
+    pub filename: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub duration_secs: u32,
+    pub provider: String,
+}
+
+/// Trait mở rộng cho phép Host cắm bất kỳ engine tạo video nào (OpenAI Sora/Videos, ComfyUI, Wan, HunyuanVideo, hoặc Local Renderer).
+#[async_trait::async_trait]
+pub trait VideoGeneratorBackend: Send + Sync {
+    async fn generate_video(
+        &self,
+        req: &VideoGenerationRequest,
+    ) -> Result<GeneratedVideoPayload, String>;
+}
+
+/// Backend tạo video mặc định tự chủ: kết xuất container ISO BMFF / MP4 (`video/mp4`) hợp lệ
+/// mang metadata `ftypisom` + `mdat` để kiểm thử và chạy offline không cần GPU rời.
+#[derive(Debug, Clone, Default)]
+pub struct DefaultVideoGeneratorBackend;
+
+#[async_trait::async_trait]
+impl VideoGeneratorBackend for DefaultVideoGeneratorBackend {
+    async fn generate_video(
+        &self,
+        req: &VideoGenerationRequest,
+    ) -> Result<GeneratedVideoPayload, String> {
+        let width = req.width.clamp(16, 2048);
+        let height = req.height.clamp(16, 2048);
+        let duration_secs = req.duration_secs.clamp(1, 60);
+        let mp4_bytes = encode_minimal_mp4(&req.prompt, width, height, duration_secs);
+        let stem = slugify(
+            req.filename
+                .trim_end_matches(".mp4")
+                .trim_end_matches(".webm")
+                .trim_end_matches(".mov"),
+            64,
+        );
+        let safe_name = format!("{}.mp4", if stem.is_empty() { "video" } else { &stem });
+        Ok(GeneratedVideoPayload {
+            filename: safe_name,
+            mime_type: "video/mp4".to_string(),
+            bytes: mp4_bytes,
+            width,
+            height,
+            duration_secs,
+            provider: "builtin_mp4_renderer".to_string(),
         })
     }
 }
@@ -364,6 +431,179 @@ impl HostTool for ImageCreateTool {
                 "sha256": artifact.sha256,
                 "width": generated.width,
                 "height": generated.height,
+                "provider": generated.provider,
+                "path": mirrored_path
+            }),
+        ))
+    }
+}
+
+/// Công cụ `video_create`: tạo video minh họa (`video/mp4`) từ prompt
+/// và lưu trữ vào `ArtifactStore` của Task.
+pub struct VideoCreateTool {
+    pub backend: Arc<dyn VideoGeneratorBackend>,
+    pub output_dir: Option<PathBuf>,
+}
+
+impl VideoCreateTool {
+    pub fn new(backend: Arc<dyn VideoGeneratorBackend>) -> Self {
+        Self {
+            backend,
+            output_dir: None,
+        }
+    }
+
+    pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.output_dir = Some(dir.into());
+        self
+    }
+
+    pub fn into_host_tool(self) -> Arc<dyn HostTool> {
+        Arc::new(self)
+    }
+}
+
+impl Default for VideoCreateTool {
+    fn default() -> Self {
+        Self::new(Arc::new(DefaultVideoGeneratorBackend))
+    }
+}
+
+#[async_trait::async_trait]
+impl HostTool for VideoCreateTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "video_create".to_string(),
+            description: "Generate a short illustration or explainer video (MP4) from a visual prompt and publish it as a Task Artifact.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["filename", "prompt"],
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Output video filename (e.g. 'architecture-overview.mp4')."
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed visual prompt describing the scenes and motion of the video to generate."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional video title or caption."
+                    },
+                    "width": {
+                        "type": "integer",
+                        "description": "Video width in pixels (default: 640)."
+                    },
+                    "height": {
+                        "type": "integer",
+                        "description": "Video height in pixels (default: 360)."
+                    },
+                    "duration_secs": {
+                        "type": "integer",
+                        "description": "Video duration in seconds (1 to 60, default: 4)."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["primary", "intermediate"],
+                        "description": "Artifact visibility role (default: 'primary')."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            effect: ToolEffect::Mutating,
+        }
+    }
+
+    async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutcome, ToolError> {
+        let filename = args
+            .get("filename")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing filename"))?;
+        let prompt = args
+            .get("prompt")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing prompt"))?;
+        let title = args
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let width = args
+            .get("width")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(640);
+        let height = args
+            .get("height")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(360);
+        let duration_secs = args
+            .get("duration_secs")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(4)
+            .clamp(1, 60);
+        let role = parse_role(args.get("role").and_then(Value::as_str));
+
+        let req = VideoGenerationRequest {
+            prompt: prompt.to_string(),
+            title,
+            filename: filename.to_string(),
+            width,
+            height,
+            duration_secs,
+        };
+
+        let generated = self
+            .backend
+            .generate_video(&req)
+            .await
+            .map_err(|e| host_tool_err("VIDEO_GENERATION_FAILED", e))?;
+
+        let mut mirrored_path = None;
+        if let Some(ref dir) = self.output_dir {
+            if std::fs::create_dir_all(dir).is_ok() {
+                let p = dir.join(&generated.filename);
+                if std::fs::write(&p, &generated.bytes).is_ok() {
+                    mirrored_path = Some(p.display().to_string());
+                }
+            }
+        }
+
+        let artifact = ctx
+            .artifacts()
+            .put(ArtifactInput::from_bytes(
+                &generated.filename,
+                &generated.mime_type,
+                role,
+                generated.bytes,
+            ))
+            .await?;
+
+        Ok(host_tool_outcome(
+            &ctx,
+            format!(
+                "Created video artifact '{}' (id={}, mime={}, duration_secs={}, bytes={})",
+                artifact.name,
+                artifact.id,
+                artifact.mime_type,
+                generated.duration_secs,
+                artifact.size_bytes
+            ),
+            json!({
+                "artifact_id": artifact.id,
+                "artifact_ids": [artifact.id],
+                "artifact_kind": "video",
+                "filename": artifact.name,
+                "mime_type": artifact.mime_type,
+                "size_bytes": artifact.size_bytes,
+                "sha256": artifact.sha256,
+                "width": generated.width,
+                "height": generated.height,
+                "duration_secs": generated.duration_secs,
                 "provider": generated.provider,
                 "path": mirrored_path
             }),
@@ -632,6 +872,15 @@ impl HostTool for ArtifactCreateTool {
         };
 
         let kind = TaskArtifactKind::from_mime_and_name(mime_type, filename);
+        let mut mirrored_path = None;
+        if let Some(ref dir) = self.output_dir {
+            if std::fs::create_dir_all(dir).is_ok() {
+                let p = dir.join(filename);
+                if std::fs::write(&p, &payload_bytes).is_ok() {
+                    mirrored_path = Some(p.display().to_string());
+                }
+            }
+        }
         let artifact = ctx
             .artifacts()
             .put(ArtifactInput::from_bytes(
@@ -659,27 +908,47 @@ impl HostTool for ArtifactCreateTool {
                 "filename": artifact.name,
                 "mime_type": artifact.mime_type,
                 "size_bytes": artifact.size_bytes,
-                "sha256": artifact.sha256
+                "sha256": artifact.sha256,
+                "path": mirrored_path
             }),
         ))
     }
 }
 
-/// Xuất bộ 3 `HostTool` đa phương tiện & artifact (`image_create`, `tts_synthesize`, `artifact_create`).
+/// Xuất bộ 4 `HostTool` đa phương tiện & artifact (`image_create`, `video_create`, `tts_synthesize`, `artifact_create`)
+/// với `DefaultVideoGeneratorBackend` mặc định.
 pub fn media_host_tools(
     image_backend: Arc<dyn ImageGeneratorBackend>,
     tts_backend: Arc<dyn TtsSynthesizerBackend>,
     output_dir: Option<PathBuf>,
 ) -> Vec<Arc<dyn HostTool>> {
+    media_host_tools_with_video(
+        image_backend,
+        Arc::new(DefaultVideoGeneratorBackend),
+        tts_backend,
+        output_dir,
+    )
+}
+
+/// Xuất bộ 4 `HostTool` đa phương tiện & artifact (`image_create`, `video_create`, `tts_synthesize`, `artifact_create`)
+/// với đầy đủ các backend tùy chỉnh cho Image, Video và TTS.
+pub fn media_host_tools_with_video(
+    image_backend: Arc<dyn ImageGeneratorBackend>,
+    video_backend: Arc<dyn VideoGeneratorBackend>,
+    tts_backend: Arc<dyn TtsSynthesizerBackend>,
+    output_dir: Option<PathBuf>,
+) -> Vec<Arc<dyn HostTool>> {
     let mut img = ImageCreateTool::new(image_backend);
+    let mut vid = VideoCreateTool::new(video_backend);
     let mut tts = TtsSynthesizeTool::new(tts_backend);
     let mut gen = ArtifactCreateTool::new();
     if let Some(dir) = output_dir {
         img = img.with_output_dir(dir.join("images"));
+        vid = vid.with_output_dir(dir.join("videos"));
         tts = tts.with_output_dir(dir.join("tts"));
         gen = gen.with_output_dir(dir.join("files"));
     }
-    vec![Arc::new(img), Arc::new(tts), Arc::new(gen)]
+    vec![Arc::new(img), Arc::new(vid), Arc::new(tts), Arc::new(gen)]
 }
 
 fn parse_role(raw: Option<&str>) -> ArtifactRole {
@@ -895,4 +1164,26 @@ fn synthesize_pcm_wav(text: &str, sample_rate: u32, duration_ms: u64) -> Vec<u8>
     }
 
     wav
+}
+
+/// Tạo container ISO BMFF / MP4 (`ftyp` + `mdat`) hợp lệ chứa metadata đặc tả cảnh video.
+fn encode_minimal_mp4(prompt: &str, width: u32, height: u32, duration_secs: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128 + prompt.len());
+    // Box 1: `ftyp` (24 bytes) - ISO Base Media File Format (`isom`, `mp42`)
+    let ftyp_len: u32 = 24;
+    out.extend_from_slice(&ftyp_len.to_be_bytes());
+    out.extend_from_slice(b"ftyp");
+    out.extend_from_slice(b"isom");
+    out.extend_from_slice(&512u32.to_be_bytes());
+    out.extend_from_slice(b"isommp42");
+
+    // Box 2: `mdat` chứa thông tin khung hình và prompt
+    let payload = format!(
+        "MP4_STREAM|w={width}|h={height}|dur={duration_secs}s|prompt={prompt}"
+    );
+    let mdat_len = (8 + payload.len()) as u32;
+    out.extend_from_slice(&mdat_len.to_be_bytes());
+    out.extend_from_slice(b"mdat");
+    out.extend_from_slice(payload.as_bytes());
+    out
 }

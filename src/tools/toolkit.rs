@@ -13,8 +13,9 @@ use crate::config::WorkspaceLayout;
 use crate::manager::TaskManagerInit;
 use crate::tools::markdown_report::report_host_tools;
 use crate::tools::media_artifacts::{
-    media_host_tools, DefaultImageGeneratorBackend, DefaultTtsSynthesizerBackend,
-    ImageGeneratorBackend, TtsSynthesizerBackend,
+    media_host_tools_with_video, DefaultImageGeneratorBackend, DefaultTtsSynthesizerBackend,
+    DefaultVideoGeneratorBackend, ImageGeneratorBackend, TtsSynthesizerBackend,
+    VideoGeneratorBackend,
 };
 use crate::tools::pdf::{pdf_host_tools, SharedPdfState};
 use crate::tools::web::{web_host_tools, HtmlWorkspace};
@@ -50,6 +51,7 @@ pub struct WorkspaceToolKit {
     pub yt_env: Arc<YoutubeCollectorEnv>,
     pub html_workspace: Arc<HtmlWorkspace>,
     pub image_backend: Arc<dyn ImageGeneratorBackend>,
+    pub video_backend: Arc<dyn VideoGeneratorBackend>,
     pub tts_backend: Arc<dyn TtsSynthesizerBackend>,
 }
 
@@ -112,6 +114,7 @@ impl WorkspaceToolKit {
             yt_env,
             html_workspace,
             image_backend: Arc::new(DefaultImageGeneratorBackend),
+            video_backend: Arc::new(DefaultVideoGeneratorBackend),
             tts_backend: Arc::new(DefaultTtsSynthesizerBackend),
         }
     }
@@ -119,6 +122,12 @@ impl WorkspaceToolKit {
     /// Tùy chỉnh `ImageGeneratorBackend` cho công cụ `image_create`.
     pub fn with_image_backend(mut self, backend: Arc<dyn ImageGeneratorBackend>) -> Self {
         self.image_backend = backend;
+        self
+    }
+
+    /// Tùy chỉnh `VideoGeneratorBackend` cho công cụ `video_create`.
+    pub fn with_video_backend(mut self, backend: Arc<dyn VideoGeneratorBackend>) -> Self {
+        self.video_backend = backend;
         self
     }
 
@@ -199,10 +208,11 @@ impl WorkspaceToolKit {
         report_host_tools(self.reports_dir.clone())
     }
 
-    /// Xuất bộ 3 `HostTool` đa phương tiện & đa định dạng (`image_create`, `tts_synthesize`, `artifact_create`).
+    /// Xuất bộ 4 `HostTool` đa phương tiện & đa định dạng (`image_create`, `video_create`, `tts_synthesize`, `artifact_create`).
     pub fn media_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
-        media_host_tools(
+        media_host_tools_with_video(
             Arc::clone(&self.image_backend),
+            Arc::clone(&self.video_backend),
             Arc::clone(&self.tts_backend),
             Some(self.reports_dir.clone()),
         )

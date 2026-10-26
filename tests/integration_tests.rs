@@ -1319,9 +1319,15 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
             }),
         )],
     );
-    // 2. Subagent `media_creator` calls 5 tools
+    // 2. Subagent `media_creator` calls 6 tools in sequence:
+    //    - `markdown_create` (Report)
+    //    - `image_create` PNG (Image)
+    //    - `image_create` SVG (Image)
+    //    - `video_create` MP4 (Video)
+    //    - `tts_synthesize` WAV (Audio)
+    //    - `artifact_create` JSON (Data, intermediate)
     gw.push_tool_calls(
-        "Creating report, images, TTS audio, and JSON artifact",
+        "Creating all 6 multi-kind artifacts",
         vec![
             (
                 "call_md",
@@ -1356,6 +1362,18 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
                 }),
             ),
             (
+                "call_vid",
+                "video_create",
+                json!({
+                    "filename": "b200-flythrough.mp4",
+                    "title": "Blackwell Rack Flythrough",
+                    "prompt": "Camera flying through liquid-cooled GB200 NVL72 rack",
+                    "width": 640,
+                    "height": 360,
+                    "duration_secs": 5
+                }),
+            ),
+            (
                 "call_tts",
                 "tts_synthesize",
                 json!({
@@ -1379,9 +1397,9 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
         ],
     );
     // 3. Subagent finishes
-    gw.push_text("Đã tạo đủ 5 artifacts: báo cáo Markdown, ảnh PNG, sơ đồ SVG, giọng đọc TTS WAV và dữ liệu JSON.");
+    gw.push_text("Đã tạo đủ 6 artifacts: báo cáo Markdown, ảnh PNG, sơ đồ SVG, video MP4, giọng đọc TTS WAV và dữ liệu JSON.");
     // 4. Root agent finishes
-    gw.push_text("Hoàn tất gói đa phương tiện B200 gồm báo cáo, hình ảnh và âm thanh TTS.");
+    gw.push_text("Hoàn tất gói đa phương tiện B200 gồm báo cáo, hình ảnh, video và âm thanh TTS.");
 
     let root_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
         .with_mode(AgentMode::Primary)
@@ -1398,6 +1416,7 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
         .with_allowed_tools([
             "markdown_create",
             "image_create",
+            "video_create",
             "tts_synthesize",
             "artifact_create",
         ])
@@ -1424,36 +1443,40 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
     let task = task_mgr
         .create_task(CreateTaskRequest::new(
             "B200 Multi-Modal Briefing",
-            "Tạo báo cáo, ảnh minh họa và audio TTS cho B200.",
+            "Tạo báo cáo, ảnh minh họa, video và audio TTS cho B200.",
         ))
         .await
         .unwrap();
 
-    for _ in 0..40 {
+    let mut terminal_reached = false;
+    for _ in 0..120 {
         if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
             tokio::time::timeout(Duration::from_secs(3), sub.recv()).await
         {
             if t.id == task.id {
                 assert_eq!(t.status, TaskStatus::Completed);
+                terminal_reached = true;
                 break;
             }
         }
     }
+    assert!(terminal_reached, "task should reach TaskTerminal");
 
     let detail = task_mgr.get_task_detail(&task.id).await.unwrap();
     assert_eq!(
         detail.artifacts.len(),
-        5,
-        "should have 5 artifacts recorded"
+        6,
+        "should have 6 artifacts recorded"
     );
 
     let summary = detail.execution_summary.expect("execution_summary");
-    assert_eq!(summary.total_artifacts, 5);
-    assert_eq!(summary.primary_artifacts, 4);
+    assert_eq!(summary.total_artifacts, 6);
+    assert_eq!(summary.primary_artifacts, 5);
     assert_eq!(summary.report_artifacts, 1);
     assert_eq!(summary.image_artifacts, 2);
+    assert_eq!(summary.video_artifacts, 1);
     assert_eq!(summary.audio_artifacts, 1);
-    assert_eq!(summary.artifact_ids.len(), 5);
+    assert_eq!(summary.artifact_ids.len(), 6);
 
     // Kiểm tra từng loại artifact và đọc lại kèm xác minh SHA-256
     let md_art = detail
@@ -1508,6 +1531,20 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
         .unwrap();
     assert!(svg_text.contains("<svg"));
     assert!(svg_text.contains("NVLink 5 Topology"));
+
+    let vid_art = detail
+        .artifacts
+        .iter()
+        .find(|a| a.name == "b200-flythrough.mp4")
+        .expect("video artifact");
+    assert_eq!(vid_art.kind, orchestrator_flow_rs::TaskArtifactKind::Video);
+    assert_eq!(vid_art.mime_type, "video/mp4");
+    assert_eq!(vid_art.producer_tool_name.as_deref(), Some("video_create"));
+    let (_, vid_bytes) = task_mgr
+        .read_task_artifact_bytes(&task.id, &vid_art.id)
+        .await
+        .unwrap();
+    assert_eq!(&vid_bytes[4..8], b"ftyp");
 
     let wav_art = detail
         .artifacts

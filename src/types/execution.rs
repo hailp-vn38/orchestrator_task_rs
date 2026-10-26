@@ -47,6 +47,8 @@ pub struct TaskExecutionSummary {
     pub report_artifacts: usize,
     /// Số lượng Task Artifacts thuộc phân loại `image` (`image/*`).
     pub image_artifacts: usize,
+    /// Số lượng Task Artifacts thuộc phân loại `video` (`video/*`).
+    pub video_artifacts: usize,
     /// Số lượng Task Artifacts thuộc phân loại `audio` / TTS (`audio/*`).
     pub audio_artifacts: usize,
     /// Danh sách các `artifact_id` đã xuất bản trong Task (khử trùng lặp).
@@ -159,6 +161,7 @@ impl TaskExecutionSummary {
         self.primary_artifacts = 0;
         self.report_artifacts = 0;
         self.image_artifacts = 0;
+        self.video_artifacts = 0;
         self.audio_artifacts = 0;
         for art in artifacts {
             push_unique(&mut self.artifact_ids, &art.id);
@@ -171,6 +174,9 @@ impl TaskExecutionSummary {
                 }
                 TaskArtifactKind::Image => {
                     self.image_artifacts = self.image_artifacts.saturating_add(1);
+                }
+                TaskArtifactKind::Video => {
+                    self.video_artifacts = self.video_artifacts.saturating_add(1);
                 }
                 TaskArtifactKind::Audio => {
                     self.audio_artifacts = self.audio_artifacts.saturating_add(1);

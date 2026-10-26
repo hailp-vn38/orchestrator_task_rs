@@ -235,13 +235,14 @@ impl HomelabExampleApp {
             AgentDefinition::new("media_creator", "live", &model)
                 .with_mode(AgentMode::Subagent)
                 .with_description(
-                    "Generates PNG/SVG images via image_create, synthesizes TTS audio via tts_synthesize, and publishes structured Task Artifacts via artifact_create.",
+                    "Generates PNG/SVG images via image_create, MP4 videos via video_create, synthesizes TTS audio via tts_synthesize, and publishes structured Task Artifacts via artifact_create.",
                 )
                 .with_prompt_path(prompts.join("media_creator.md"))
                 .with_context_limit_tokens(context_limit_tokens)
                 .with_max_output_tokens(max_output_tokens)
                 .with_allowed_tools([
                     "image_create",
+                    "video_create",
                     "tts_synthesize",
                     "artifact_create",
                 ])

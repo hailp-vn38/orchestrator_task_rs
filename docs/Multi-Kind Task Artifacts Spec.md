@@ -1,6 +1,6 @@
 # Đặc tả Multi-Kind Task Artifacts & Bộ Công Cụ Đa Phương Tiện cho Subagent
 
-Tài liệu này mô tả kiến trúc, kiểu dữ liệu, API truy vấn/tải xuống và bộ công cụ `HostTool` cho phép các Task trong `orchestrator_flow_rs` (`orchestrator_task_rs`) xuất bản, phân loại và phục vụ **Artifacts đa định dạng** (Báo cáo Markdown, Hình ảnh PNG/SVG, Âm thanh giọng đọc TTS WAV, Tài liệu PDF, và Dữ liệu cấu trúc JSON/CSV) từ cả Root Agent lẫn Subagent con.
+Tài liệu này mô tả kiến trúc, kiểu dữ liệu, API truy vấn/tải xuống và bộ công cụ `HostTool` cho phép các Task trong `orchestrator_flow_rs` (`orchestrator_task_rs`) xuất bản, phân loại và phục vụ **Artifacts đa định dạng** (Báo cáo Markdown, Hình ảnh PNG/SVG, Video MP4, Âm thanh giọng đọc TTS WAV, Tài liệu PDF, và Dữ liệu cấu trúc JSON/CSV) từ cả Root Agent lẫn Subagent con.
 
 ---
 
@@ -15,14 +15,14 @@ Tài liệu này mô tả kiến trúc, kiểu dữ liệu, API truy vấn/tải
                                         ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                   Subagent (media_creator / report_stager)                 │
-│  ┌───────────────────┐  ┌──────────────────┐  ┌─────────────────────────┐  │
-│  │  markdown_create  │  │   image_create   │  │     tts_synthesize      │  │
-│  │  (text/markdown)  │  │ (image/png, svg) │  │      (audio/wav)        │  │
-│  └─────────┬─────────┘  └────────┬─────────┘  └────────────┬────────────┘  │
-│            │                     │                         │               │
-│            └─────────────────────┼─────────────────────────┘               │
-│                                  ▼                                         │
-│            ToolContext::artifacts().put(ArtifactInput)                     │
+│ ┌─────────────────┐ ┌──────────────────┐ ┌──────────────┐ ┌──────────────┐ │
+│ │ markdown_create │ │   image_create   │ │ video_create │ │tts_synthesize│ │
+│ │ (text/markdown) │ │ (image/png, svg) │ │ (video/mp4)  │ │ (audio/wav)  │ │
+│ └────────┬────────┘ └────────┬─────────┘ └──────┬───────┘ └──────┬───────┘ │
+│          │                   │                  │                │         │
+│          └───────────────────┴─────────┬────────┴────────────────┘         │
+│                                        ▼                                   │
+│                  ToolContext::artifacts().put(ArtifactInput)               │
 └──────────────────────────────────┬─────────────────────────────────────────┘
                                    │
                                    ▼
@@ -59,13 +59,14 @@ Phân loại ngữ nghĩa của Artifact được suy luận tự động từ `
 | :--- | :--- | :--- |
 | `TaskArtifactKind::Report` | `"report"` | `text/markdown`, `text/plain`, `text/html` (`.md`, `.txt`, `.html`) |
 | `TaskArtifactKind::Image` | `"image"` | `image/png`, `image/svg+xml`, `image/jpeg`, `image/webp`, `image/gif` |
+| `TaskArtifactKind::Video` | `"video"` | `video/mp4`, `video/webm`, `video/quicktime` (`.mp4`, `.webm`, `.mov`, `.mkv`, `.avi`) |
 | `TaskArtifactKind::Audio` | `"audio"` | `audio/wav`, `audio/mpeg`, `audio/ogg`, `audio/flac`, `audio/aac` |
 | `TaskArtifactKind::Document` | `"document"` | `application/pdf`, `application/epub+zip` (`.pdf`, `.epub`) |
 | `TaskArtifactKind::Data` | `"data"` | `application/json`, `text/csv`, `application/xml` (`.json`, `.csv`, `.xml`) |
 | `TaskArtifactKind::Other` | `"other"` | Các định dạng nhị phân khác (`application/octet-stream`, ...) |
 
 ### 2.2. `TaskArtifactRole`
-- `TaskArtifactRole::Primary` (`"primary"`): Sản phẩm bàn giao chính của Task (báo cáo hoàn chỉnh, ảnh minh họa, file giọng đọc TTS).
+- `TaskArtifactRole::Primary` (`"primary"`): Sản phẩm bàn giao chính của Task (báo cáo hoàn chỉnh, ảnh minh họa, video clip, file giọng đọc TTS).
 - `TaskArtifactRole::Intermediate` (`"intermediate"`): Dữ liệu trung gian hoặc số liệu phụ trợ giữa các bước.
 
 ### 2.3. `TaskArtifactView` & `TaskArtifactDownload`
@@ -99,6 +100,7 @@ pub struct TaskArtifactDownload {
   - `primary_artifacts: usize`
   - `report_artifacts: usize`
   - `image_artifacts: usize`
+  - `video_artifacts: usize`
   - `audio_artifacts: usize`
   - `artifact_ids: Vec<String>`
 
@@ -124,7 +126,20 @@ Cho phép Subagent tạo hình ảnh minh họa hoặc sơ đồ kỹ thuật v�
   - Mặc định đi kèm `DefaultImageGeneratorBackend` tự chủ (kết xuất ảnh raster PNG chuẩn RFC-2083 với zlib/IDAT + CRC32 và đồ họa vector SVG không cần GPU rời).
   - Host có thể cắm bất kỳ provider tạo ảnh bên ngoài nào (OpenAI Images, ComfyUI, SDXL, Flux) qua `WorkspaceToolKit::with_image_backend(Arc<dyn ImageGeneratorBackend>)`.
 
-### 3.3. `tts_synthesize` (`TtsSynthesizeTool`)
+### 3.3. `video_create` (`VideoCreateTool`)
+Cho phép Subagent tạo video minh họa (`video/mp4`) từ prompt và xuất bản thành `TaskArtifactKind::Video`:
+- **Tham số đầu vào**:
+  - `filename` (bắt buộc): Tên file video đầu ra (VD: `"b200-flythrough.mp4"`).
+  - `prompt` (bắt buộc): Mô tả chi tiết bối cảnh và chuyển động của video cần tạo.
+  - `title` (tùy chọn): Tiêu đề hiển thị của video.
+  - `width`, `height` (tùy chọn): Độ phân giải video (mặc định `640x360`).
+  - `duration_secs` (tùy chọn): Thời lượng video tính bằng giây (`1..=60`, mặc định `4`).
+  - `role` (tùy chọn): `"primary"` (mặc định) hoặc `"intermediate"`.
+- **Khả năng mở rộng Backend (`VideoGeneratorBackend`)**:
+  - Mặc định đi kèm `DefaultVideoGeneratorBackend` tự chủ (đóng gói container ISO BMFF/MP4 `ftypisom` + `mdat` hợp lệ để kiểm thử không cần GPU rời).
+  - Host có thể cắm bất kỳ provider tạo video bên ngoài nào qua `WorkspaceToolKit::with_video_backend(Arc<dyn VideoGeneratorBackend>)`.
+
+### 3.4. `tts_synthesize` (`TtsSynthesizeTool`)
 Cho phép Subagent chuyển đổi văn bản thành giọng nói (TTS) và xuất bản thành `TaskArtifactKind::Audio`:
 - **Tham số đầu vào**:
   - `text` (bắt buộc): Nội dung văn bản cần đọc thành tiếng.
@@ -137,7 +152,7 @@ Cho phép Subagent chuyển đổi văn bản thành giọng nói (TTS) và xu�
   - Mặc định đi kèm `DefaultTtsSynthesizerBackend` tạo file âm thanh RIFF/WAVE PCM 16-bit mono (`audio/wav`) hợp lệ.
   - Host có thể cắm engine TTS thực tế (Kokoro, Piper, VietTTS, OpenAI Speech, ElevenLabs) qua `WorkspaceToolKit::with_tts_backend(Arc<dyn TtsSynthesizerBackend>)`.
 
-### 3.4. `artifact_create` (`ArtifactCreateTool`)
+### 3.5. `artifact_create` (`ArtifactCreateTool`)
 Công cụ đa năng cho phép Subagent xuất bản bất kỳ định dạng dữ liệu nào (`application/json`, `text/csv`, `text/html`, `image/svg+xml`, hoặc dữ liệu nhị phân `hex_bytes`) vào `ArtifactStore`.
 
 ---

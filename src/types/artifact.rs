@@ -15,6 +15,8 @@ pub enum TaskArtifactKind {
     Report,
     /// Hình ảnh minh họa, sơ đồ, biểu đồ hoặc ảnh render (`image/png`, `image/jpeg`, `image/webp`, `image/svg+xml`, `image/gif`).
     Image,
+    /// Video minh họa hoặc clip tổng hợp (`video/mp4`, `video/webm`, `video/quicktime`).
+    Video,
     /// Âm thanh tổng hợp hoặc giọng đọc TTS (`audio/wav`, `audio/mpeg`, `audio/ogg`, `audio/flac`, `audio/aac`).
     Audio,
     /// Tài liệu định dạng chuẩn (`application/pdf`, `application/epub+zip`, ...).
@@ -30,6 +32,7 @@ impl TaskArtifactKind {
         match self {
             Self::Report => "report",
             Self::Image => "image",
+            Self::Video => "video",
             Self::Audio => "audio",
             Self::Document => "document",
             Self::Data => "data",
@@ -49,6 +52,9 @@ impl TaskArtifactKind {
 
         if base_mime.starts_with("image/") {
             return Self::Image;
+        }
+        if base_mime.starts_with("video/") {
+            return Self::Video;
         }
         if base_mime.starts_with("audio/") {
             return Self::Audio;
@@ -88,6 +94,14 @@ impl TaskArtifactKind {
             || lower_name.ends_with(".gif")
         {
             return Self::Image;
+        }
+        if lower_name.ends_with(".mp4")
+            || lower_name.ends_with(".webm")
+            || lower_name.ends_with(".mov")
+            || lower_name.ends_with(".mkv")
+            || lower_name.ends_with(".avi")
+        {
+            return Self::Video;
         }
         if lower_name.ends_with(".wav")
             || lower_name.ends_with(".mp3")

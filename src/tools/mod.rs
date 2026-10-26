@@ -25,10 +25,11 @@ pub mod youtube;
 
 pub use markdown_report::{report_host_tools, MarkdownCreateTool, MarkdownReadTool};
 pub use media_artifacts::{
-    media_host_tools, ArtifactCreateTool, DefaultImageGeneratorBackend,
-    DefaultTtsSynthesizerBackend, GeneratedImagePayload, ImageCreateTool, ImageGenerationRequest,
+    media_host_tools, media_host_tools_with_video, ArtifactCreateTool,
+    DefaultImageGeneratorBackend, DefaultTtsSynthesizerBackend, DefaultVideoGeneratorBackend,
+    GeneratedImagePayload, GeneratedVideoPayload, ImageCreateTool, ImageGenerationRequest,
     ImageGeneratorBackend, SynthesizedAudioPayload, TtsSynthesisRequest, TtsSynthesizeTool,
-    TtsSynthesizerBackend,
+    TtsSynthesizerBackend, VideoCreateTool, VideoGenerationRequest, VideoGeneratorBackend,
 };
 pub use pdf::{
     build_sample_technical_pdf, convert_document_with_anydoc, pdf_host_tools, AnydocInspectPdfTool,
