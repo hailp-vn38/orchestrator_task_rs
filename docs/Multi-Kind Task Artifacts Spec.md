@@ -118,8 +118,8 @@ Cho phép Subagent tạo hình ảnh minh họa hoặc sơ đồ kỹ thuật v�
   - `filename` (bắt buộc): Tên file ảnh đầu ra (VD: `"b200-banner.png"` hoặc `"nvlink-topology.svg"`).
   - `prompt` (bắt buộc): Mô tả chi tiết hình ảnh hoặc sơ đồ cần tạo.
   - `title` (tùy chọn): Tiêu đề hiển thị trên sơ đồ/thẻ hình ảnh.
-  - `format` (tùy chọn): `"png"` hoặc `"svg"` (mặc định suy luận từ phần mở rộng của `filename`).
-  - `width`, `height` (tùy chọn): Kích thước ảnh (mặc định `640x360`).
+  - `format` (tùy chọn): `"png"` hoặc `"svg"` (mặc định suy luận từ phần mở rộng của `filename` hoặc sự hiện diện của `svg_content`).
+  - `width`, `height` (tùy chọn): Kích thước ảnh do Agent tự chọn (`16..=2048`) hoặc để trống dùng mặc định theo định dạng (`1024x1024` cho PNG, `1200x675` cho SVG).
   - `svg_content` (tùy chọn): Mã nguồn `<svg>...</svg>` do Subagent tự thiết kế khi vẽ sơ đồ vector.
   - `role` (tùy chọn): `"primary"` (mặc định) hoặc `"intermediate"`.
 - **Khả năng mở rộng Backend (`ImageGeneratorBackend`)**:
@@ -132,7 +132,7 @@ Cho phép Subagent tạo video minh họa (`video/mp4`) từ prompt và xuất b
   - `filename` (bắt buộc): Tên file video đầu ra (VD: `"b200-flythrough.mp4"`).
   - `prompt` (bắt buộc): Mô tả chi tiết bối cảnh và chuyển động của video cần tạo.
   - `title` (tùy chọn): Tiêu đề hiển thị của video.
-  - `width`, `height` (tùy chọn): Độ phân giải video (mặc định `640x360`).
+  - `width`, `height` (tùy chọn): Độ phân giải video do Agent tự chọn (`16..=2048`) hoặc để trống dùng mặc định (`640x360`).
   - `duration_secs` (tùy chọn): Thời lượng video tính bằng giây (`1..=60`, mặc định `4`).
   - `role` (tùy chọn): `"primary"` (mặc định) hoặc `"intermediate"`.
 - **Khả năng mở rộng Backend (`VideoGeneratorBackend`)**:

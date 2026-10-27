@@ -30,6 +30,8 @@ pub use media_artifacts::{
     GeneratedImagePayload, GeneratedVideoPayload, ImageCreateTool, ImageGenerationRequest,
     ImageGeneratorBackend, SynthesizedAudioPayload, TtsSynthesisRequest, TtsSynthesizeTool,
     TtsSynthesizerBackend, VideoCreateTool, VideoGenerationRequest, VideoGeneratorBackend,
+    DEFAULT_PNG_HEIGHT, DEFAULT_PNG_WIDTH, DEFAULT_SVG_HEIGHT, DEFAULT_SVG_WIDTH,
+    DEFAULT_VIDEO_HEIGHT, DEFAULT_VIDEO_WIDTH,
 };
 pub use pdf::{
     build_sample_technical_pdf, convert_document_with_anydoc, pdf_host_tools, AnydocInspectPdfTool,

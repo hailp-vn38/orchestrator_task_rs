@@ -16,6 +16,19 @@ use serde_json::{json, Value};
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 use crate::types::TaskArtifactKind;
 
+/// Chiều rộng mặc định cho ảnh raster PNG (`1024` px — tương thích chuẩn OpenAI Images / DALL-E / Flux).
+pub const DEFAULT_PNG_WIDTH: u32 = 1024;
+/// Chiều cao mặc định cho ảnh raster PNG (`1024` px).
+pub const DEFAULT_PNG_HEIGHT: u32 = 1024;
+/// Chiều rộng mặc định cho sơ đồ vector SVG (`1200` px — tỷ lệ 16:9 widescreen).
+pub const DEFAULT_SVG_WIDTH: u32 = 1200;
+/// Chiều cao mặc định cho sơ đồ vector SVG (`675` px — tỷ lệ 16:9 widescreen).
+pub const DEFAULT_SVG_HEIGHT: u32 = 675;
+/// Chiều rộng mặc định cho video clip MP4 (`640` px).
+pub const DEFAULT_VIDEO_WIDTH: u32 = 640;
+/// Chiều cao mặc định cho video clip MP4 (`360` px).
+pub const DEFAULT_VIDEO_HEIGHT: u32 = 360;
+
 /// Yêu cầu sinh hình ảnh gửi tới [`ImageGeneratorBackend`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageGenerationRequest {
@@ -27,6 +40,51 @@ pub struct ImageGenerationRequest {
     pub width: u32,
     pub height: u32,
     pub svg_content: Option<String>,
+}
+
+impl ImageGenerationRequest {
+    /// Kiểm tra yêu cầu này có xuất ra định dạng vector SVG (`image/svg+xml`) hay không.
+    pub fn is_svg(&self) -> bool {
+        self.format.trim().eq_ignore_ascii_case("svg")
+            || self
+                .svg_content
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Trả về kích thước hiệu lực `(width, height)` đã chuẩn hóa trong khoảng `16..=2048`:
+    /// - Nếu `width` / `height` khác `0`, giữ giá trị do Agent chỉ định (clamp `16..=2048`).
+    /// - Nếu là SVG có truyền `<svg ...>` đầy đủ trong `svg_content` và `width == 0` hoặc `height == 0`,
+    ///   ưu tiên trích xuất kích thước từ thuộc tính `width`/`height` hoặc `viewBox` của thẻ `<svg>` gốc.
+    /// - Ngược lại, dùng mặc định theo định dạng (`1200x675` cho SVG, `1024x1024` cho PNG).
+    pub fn effective_dimensions(&self) -> (u32, u32) {
+        let is_svg = self.is_svg();
+        let svg_dims = if is_svg {
+            self.svg_content
+                .as_deref()
+                .and_then(extract_svg_root_dimensions)
+        } else {
+            None
+        };
+        let (default_w, default_h) = if is_svg {
+            svg_dims.unwrap_or((DEFAULT_SVG_WIDTH, DEFAULT_SVG_HEIGHT))
+        } else {
+            (DEFAULT_PNG_WIDTH, DEFAULT_PNG_HEIGHT)
+        };
+        let width = if self.width == 0 {
+            default_w
+        } else {
+            self.width
+        }
+        .clamp(16, 2048);
+        let height = if self.height == 0 {
+            default_h
+        } else {
+            self.height
+        }
+        .clamp(16, 2048);
+        (width, height)
+    }
 }
 
 /// Kết quả hình ảnh sinh ra từ [`ImageGeneratorBackend`].
@@ -60,26 +118,34 @@ impl ImageGeneratorBackend for DefaultImageGeneratorBackend {
         &self,
         req: &ImageGenerationRequest,
     ) -> Result<GeneratedImagePayload, String> {
-        let width = req.width.clamp(16, 2048);
-        let height = req.height.clamp(16, 2048);
-        let fmt = req.format.trim().to_ascii_lowercase();
+        let (width, height) = req.effective_dimensions();
 
-        if fmt == "svg" || req.svg_content.is_some() {
-            let svg = match req.svg_content {
-                Some(ref raw) if raw.trim().starts_with("<svg") => raw.trim().to_string(),
-                Some(ref inner) => render_svg_card(
+        if req.is_svg() {
+            let (svg, final_w, final_h) = match req.svg_content {
+                Some(ref raw) if raw.trim().get(..4).is_some_and(|p| p.eq_ignore_ascii_case("<svg")) => {
+                    ensure_svg_root_dimensions(raw.trim(), width, height)
+                }
+                Some(ref inner) => (
+                    render_svg_card(
+                        width,
+                        height,
+                        req.title.as_deref().unwrap_or("Generated Diagram"),
+                        &req.prompt,
+                        Some(inner),
+                    ),
                     width,
                     height,
-                    req.title.as_deref().unwrap_or("Generated Diagram"),
-                    &req.prompt,
-                    Some(inner),
                 ),
-                None => render_svg_card(
+                None => (
+                    render_svg_card(
+                        width,
+                        height,
+                        req.title.as_deref().unwrap_or("Visual Summary"),
+                        &req.prompt,
+                        None,
+                    ),
                     width,
                     height,
-                    req.title.as_deref().unwrap_or("Visual Summary"),
-                    &req.prompt,
-                    None,
                 ),
             };
             let stem = slugify(
@@ -93,16 +159,14 @@ impl ImageGeneratorBackend for DefaultImageGeneratorBackend {
                 filename: safe_name,
                 mime_type: "image/svg+xml".to_string(),
                 bytes: svg.into_bytes(),
-                width,
-                height,
+                width: final_w,
+                height: final_h,
                 provider: "builtin_svg_renderer".to_string(),
             });
         }
 
-        // Mặc định: kết xuất ảnh PNG chuẩn RFC-2083 (màu gradient đặc trưng theo hash của prompt)
-        let render_w = width.clamp(16, 256);
-        let render_h = height.clamp(16, 256);
-        let png_bytes = encode_gradient_png(render_w, render_h, &req.prompt);
+        // Mặc định: kết xuất ảnh PNG chuẩn RFC-2083 với đúng kích thước (width, height) trong IHDR
+        let png_bytes = encode_gradient_png(width, height, &req.prompt);
         let stem = slugify(
             req.filename
                 .trim_end_matches(".png")
@@ -114,8 +178,8 @@ impl ImageGeneratorBackend for DefaultImageGeneratorBackend {
             filename: safe_name,
             mime_type: "image/png".to_string(),
             bytes: png_bytes,
-            width: render_w,
-            height: render_h,
+            width,
+            height,
             provider: "builtin_png_renderer".to_string(),
         })
     }
@@ -130,6 +194,26 @@ pub struct VideoGenerationRequest {
     pub width: u32,
     pub height: u32,
     pub duration_secs: u32,
+}
+
+impl VideoGenerationRequest {
+    /// Trả về kích thước hiệu lực `(width, height)` đã chuẩn hóa trong khoảng `16..=2048`
+    /// (mặc định `640x360` khi `width == 0` hoặc `height == 0`).
+    pub fn effective_dimensions(&self) -> (u32, u32) {
+        let width = if self.width == 0 {
+            DEFAULT_VIDEO_WIDTH
+        } else {
+            self.width
+        }
+        .clamp(16, 2048);
+        let height = if self.height == 0 {
+            DEFAULT_VIDEO_HEIGHT
+        } else {
+            self.height
+        }
+        .clamp(16, 2048);
+        (width, height)
+    }
 }
 
 /// Kết quả video sinh ra từ [`VideoGeneratorBackend`].
@@ -164,8 +248,7 @@ impl VideoGeneratorBackend for DefaultVideoGeneratorBackend {
         &self,
         req: &VideoGenerationRequest,
     ) -> Result<GeneratedVideoPayload, String> {
-        let width = req.width.clamp(16, 2048);
-        let height = req.height.clamp(16, 2048);
+        let (width, height) = req.effective_dimensions();
         let duration_secs = req.duration_secs.clamp(1, 60);
         let mp4_bytes = encode_minimal_mp4(&req.prompt, width, height, duration_secs);
         let stem = slugify(
@@ -315,11 +398,11 @@ impl HostTool for ImageCreateTool {
                     },
                     "width": {
                         "type": "integer",
-                        "description": "Image width in pixels (default: 640)."
+                        "description": "Optional image width in pixels (16..=2048). Agent may set custom width or omit to use format default (1024 for PNG, 1200 for SVG)."
                     },
                     "height": {
                         "type": "integer",
-                        "description": "Image height in pixels (default: 360)."
+                        "description": "Optional image height in pixels (16..=2048). Agent may set custom height or omit to use format default (1024 for PNG, 675 for SVG)."
                     },
                     "svg_content": {
                         "type": "string",
@@ -352,7 +435,14 @@ impl HostTool for ImageCreateTool {
             .get("title")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let inferred_fmt = if filename.trim().to_ascii_lowercase().ends_with(".svg") {
+        let svg_content = args
+            .get("svg_content")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string);
+        let inferred_fmt = if filename.trim().to_ascii_lowercase().ends_with(".svg")
+            || svg_content.is_some()
+        {
             "svg"
         } else {
             "png"
@@ -360,34 +450,34 @@ impl HostTool for ImageCreateTool {
         let format = args
             .get("format")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or(inferred_fmt)
-            .to_string();
-        let width = args
+            .to_ascii_lowercase();
+        let raw_width = args
             .get("width")
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(640);
-        let height = args
+            .unwrap_or(0);
+        let raw_height = args
             .get("height")
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(360);
-        let svg_content = args
-            .get("svg_content")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_string);
+            .unwrap_or(0);
         let role = parse_role(args.get("role").and_then(Value::as_str));
 
-        let req = ImageGenerationRequest {
+        let mut req = ImageGenerationRequest {
             prompt: prompt.to_string(),
             title,
             filename: filename.to_string(),
             format,
-            width,
-            height,
+            width: raw_width,
+            height: raw_height,
             svg_content,
         };
+        let (width, height) = req.effective_dimensions();
+        req.width = width;
+        req.height = height;
 
         let generated = self
             .backend
@@ -418,8 +508,14 @@ impl HostTool for ImageCreateTool {
         Ok(host_tool_outcome(
             &ctx,
             format!(
-                "Created image artifact '{}' (id={}, mime={}, bytes={})",
-                artifact.name, artifact.id, artifact.mime_type, artifact.size_bytes
+                "Created image artifact '{}' (id={}, mime={}, width={}, height={}, provider={}, bytes={})",
+                artifact.name,
+                artifact.id,
+                artifact.mime_type,
+                generated.width,
+                generated.height,
+                generated.provider,
+                artifact.size_bytes
             ),
             json!({
                 "artifact_id": artifact.id,
@@ -493,11 +589,11 @@ impl HostTool for VideoCreateTool {
                     },
                     "width": {
                         "type": "integer",
-                        "description": "Video width in pixels (default: 640)."
+                        "description": "Optional video width in pixels (16..=2048, default: 640)."
                     },
                     "height": {
                         "type": "integer",
-                        "description": "Video height in pixels (default: 360)."
+                        "description": "Optional video height in pixels (16..=2048, default: 360)."
                     },
                     "duration_secs": {
                         "type": "integer",
@@ -530,16 +626,16 @@ impl HostTool for VideoCreateTool {
             .get("title")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let width = args
+        let raw_width = args
             .get("width")
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(640);
-        let height = args
+            .unwrap_or(0);
+        let raw_height = args
             .get("height")
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(360);
+            .unwrap_or(0);
         let duration_secs = args
             .get("duration_secs")
             .and_then(Value::as_u64)
@@ -548,14 +644,17 @@ impl HostTool for VideoCreateTool {
             .clamp(1, 60);
         let role = parse_role(args.get("role").and_then(Value::as_str));
 
-        let req = VideoGenerationRequest {
+        let mut req = VideoGenerationRequest {
             prompt: prompt.to_string(),
             title,
             filename: filename.to_string(),
-            width,
-            height,
+            width: raw_width,
+            height: raw_height,
             duration_secs,
         };
+        let (width, height) = req.effective_dimensions();
+        req.width = width;
+        req.height = height;
 
         let generated = self
             .backend
@@ -992,6 +1091,90 @@ fn xml_escape(input: &str) -> String {
     out
 }
 
+fn extract_svg_root_dimensions(raw_svg: &str) -> Option<(u32, u32)> {
+    let trimmed = raw_svg.trim();
+    if !trimmed.get(..4)?.eq_ignore_ascii_case("<svg") {
+        return None;
+    }
+    let tag_end = trimmed.find('>')?;
+    let open_tag = &trimmed[4..tag_end];
+    let parse_dim = |s: &str| -> Option<u32> {
+        let digits: String = s
+            .trim()
+            .trim_end_matches("px")
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        digits
+            .parse::<f64>()
+            .ok()
+            .filter(|&v| v >= 16.0)
+            .map(|v| (v.round() as u32).clamp(16, 2048))
+    };
+    let attr_w = crate::tools::web::get_attr(open_tag, "width").and_then(|v| parse_dim(&v));
+    let attr_h = crate::tools::web::get_attr(open_tag, "height").and_then(|v| parse_dim(&v));
+    if let (Some(w), Some(h)) = (attr_w, attr_h) {
+        return Some((w, h));
+    }
+    if let Some(vb) = crate::tools::web::get_attr(open_tag, "viewbox") {
+        let nums: Vec<f64> = vb
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        if nums.len() == 4 && nums[2] >= 16.0 && nums[3] >= 16.0 {
+            let w = attr_w.unwrap_or_else(|| (nums[2].round() as u32).clamp(16, 2048));
+            let h = attr_h.unwrap_or_else(|| (nums[3].round() as u32).clamp(16, 2048));
+            return Some((w, h));
+        }
+    }
+    None
+}
+
+fn ensure_svg_root_dimensions(raw_svg: &str, width: u32, height: u32) -> (String, u32, u32) {
+    if let Some((svg_w, svg_h)) = extract_svg_root_dimensions(raw_svg) {
+        return (raw_svg.to_string(), svg_w, svg_h);
+    }
+    let trimmed = raw_svg.trim();
+    if trimmed.len() >= 4 && trimmed[..4].eq_ignore_ascii_case("<svg") {
+        let injected = format!(
+            r#"<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}"{}"#,
+            &trimmed[4..]
+        );
+        return (injected, width, height);
+    }
+    (trimmed.to_string(), width, height)
+}
+
+fn wrap_prompt_lines(prompt: &str, max_chars: usize, max_lines: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for para in prompt.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        let mut current = String::new();
+        for word in para.split_whitespace() {
+            if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > max_chars
+            {
+                lines.push(xml_escape(&current));
+                current.clear();
+                if lines.len() >= max_lines {
+                    return lines;
+                }
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+        if !current.is_empty() && lines.len() < max_lines {
+            lines.push(xml_escape(&current));
+        }
+        if lines.len() >= max_lines {
+            break;
+        }
+    }
+    lines
+}
+
 fn render_svg_card(
     width: u32,
     height: u32,
@@ -1000,9 +1183,31 @@ fn render_svg_card(
     custom_body: Option<&str>,
 ) -> String {
     let safe_title = xml_escape(title);
-    let safe_prompt: String = prompt.chars().take(180).collect();
-    let safe_prompt = xml_escape(&safe_prompt);
-    let body_markup = custom_body.unwrap_or("");
+    let body_markup = match custom_body {
+        Some(custom) if !custom.trim().is_empty() => {
+            let safe_prompt = xml_escape(&prompt.chars().take(160).collect::<String>());
+            format!(
+                r##"  <text x="32" y="92" fill="#94a3b8" font-family="sans-serif" font-size="14">{safe_prompt}</text>
+  {custom}"##
+            )
+        }
+        _ => {
+            let max_chars = ((width.saturating_sub(96)) / 9).clamp(32, 110) as usize;
+            let lines = wrap_prompt_lines(prompt, max_chars, 10);
+            let box_w = width.saturating_sub(64).max(64);
+            let box_h = height.saturating_sub(116).max(64);
+            let tspans: String = lines
+                .iter()
+                .enumerate()
+                .map(|(i, line)| format!("    <tspan x=\"52\" y=\"{}\">{line}</tspan>\n", 132 + (i as u32) * 24))
+                .collect();
+            format!(
+                r##"  <rect x="32" y="88" width="{box_w}" height="{box_h}" rx="12" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <text fill="#e2e8f0" font-family="sans-serif" font-size="15">
+{tspans}  </text>"##
+            )
+        }
+    };
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
   <defs>
@@ -1013,8 +1218,7 @@ fn render_svg_card(
   </defs>
   <rect width="100%" height="100%" rx="16" fill="url(#bg)"/>
   <text x="32" y="56" fill="#f8fafc" font-family="sans-serif" font-size="24" font-weight="bold">{safe_title}</text>
-  <text x="32" y="96" fill="#94a3b8" font-family="sans-serif" font-size="14">{safe_prompt}</text>
-  {body_markup}
+{body_markup}
 </svg>
 "##
     )
@@ -1187,3 +1391,7 @@ fn encode_minimal_mp4(prompt: &str, width: u32, height: u32, duration_secs: u32)
     out.extend_from_slice(payload.as_bytes());
     out
 }
+
+#[cfg(test)]
+#[path = "media_artifacts_tests.rs"]
+mod tests;

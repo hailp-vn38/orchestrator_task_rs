@@ -80,7 +80,9 @@ pub use tools::{
     SynthesizedAudioPayload, TaskToolSpec, TaskToolSuite, TtsSynthesisRequest, TtsSynthesizeTool,
     TtsSynthesizerBackend, VideoCreateTool, VideoGenerationRequest, VideoGeneratorBackend,
     WikiEngineBridgeTool, WorkspaceToolKit, YoutubeCollectorEnv, YtFetchTranscriptTool,
-    YtListPlaylistTool, COLLECTOR_TOOL_NAMES, HTML_TOOL_NAMES,
+    YtListPlaylistTool, COLLECTOR_TOOL_NAMES, DEFAULT_PNG_HEIGHT, DEFAULT_PNG_WIDTH,
+    DEFAULT_SVG_HEIGHT, DEFAULT_SVG_WIDTH, DEFAULT_VIDEO_HEIGHT, DEFAULT_VIDEO_WIDTH,
+    HTML_TOOL_NAMES,
 };
 pub use types::{
     AgentCatalogEntry, CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView,

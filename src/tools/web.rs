@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use orchestrator_agent_rs::{
-    ArtifactInput, HostTool, ToolContext, ToolDescriptor, ToolEffect, ToolError, ToolOutcome,
+    HostTool, ToolContext, ToolDescriptor, ToolEffect, ToolError, ToolOutcome,
 };
 use serde_json::{json, Value};
 
@@ -82,7 +82,7 @@ impl HtmlWorkspace {
         web_host_tools(Arc::clone(self))
     }
 
-    /// Lấy HTML từ cache hoặc tải mới bằng `curl` (blocking).
+    /// Lấy HTML từ cache hoặc tải mới bằng `curl` (blocking, chỉ lưu trong RAM).
     fn fetch_blocking(&self, url: &str) -> Result<(String, bool), ToolError> {
         validate_http_url(url)?;
         if let Some(cached) = self
@@ -94,7 +94,6 @@ impl HtmlWorkspace {
         {
             return Ok((cached, true));
         }
-        std::fs::create_dir_all(&self.raw_dir).map_err(|e| host_tool_err("IO", e.to_string()))?;
         let output = std::process::Command::new("curl")
             .args([
                 "-sSL",
@@ -120,8 +119,6 @@ impl HtmlWorkspace {
         if html.trim().is_empty() {
             return Err(host_tool_err("EMPTY_HTML", "Trang trả về nội dung rỗng"));
         }
-        let file_path = self.raw_dir.join(format!("{}.html", uuid::Uuid::new_v4()));
-        let _ = std::fs::write(&file_path, &html);
         self.cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -196,7 +193,7 @@ impl HostTool for HtmlTool {
         match self.kind {
             HtmlToolKind::FetchHtml => ToolDescriptor {
                 name: "fetch_html".into(),
-                description: "Fetch raw HTML from an http(s) URL, cache it for subsequent HTML tools, store it as an artifact, and return a structural overview of the page (including article_tag_count to distinguish single articles from category/listing pages).".into(),
+                description: "Fetch raw HTML from an http(s) URL, cache it in memory for subsequent HTML tools, and return a structural overview of the page (including article_tag_count to distinguish single articles from category/listing pages).".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {"url": url_prop},
@@ -300,15 +297,6 @@ impl HostTool for HtmlTool {
 
         match self.kind {
             HtmlToolKind::FetchHtml => {
-                let artifact = ctx
-                    .artifacts()
-                    .put(ArtifactInput::intermediate_bytes(
-                        "page.html",
-                        "text/html; charset=utf-8",
-                        html.as_bytes().to_vec(),
-                    ))
-                    .await
-                    .ok();
                 let meta = extract_metadata(&html);
                 let article_count = find_elements(&html, "article").len();
                 let overview = json!({
@@ -323,12 +311,8 @@ impl HostTool for HtmlTool {
                     "h2_count": find_elements(&html, "h2").len(),
                     "h3_count": find_elements(&html, "h3").len(),
                     "p_count": find_elements(&html, "p").len(),
-                    "artifact_id": artifact.as_ref().map(|a| &a.id),
                 });
-                let meta_out = match artifact {
-                    Some(a) => json!({"url": url, "bytes": html.len(), "artifact_ids": [a.id]}),
-                    None => json!({"url": url, "bytes": html.len()}),
-                };
+                let meta_out = json!({"url": url, "bytes": html.len()});
                 Ok(host_tool_outcome(
                     &ctx,
                     serde_json::to_string_pretty(&overview).unwrap_or_default(),
