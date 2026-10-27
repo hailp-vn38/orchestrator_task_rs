@@ -1583,6 +1583,53 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
         .unwrap();
     assert!(json_text.contains("\"fp4_pflops\":20"));
 
+    // Kiểm tra Artifact Catalog (`list_all_artifacts` & `list_artifacts`) với bộ lọc và summary
+    let catalog_all = task_mgr
+        .list_all_artifacts(&orchestrator_flow_rs::TaskArtifactFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(catalog_all.total, 6);
+    assert_eq!(catalog_all.items.len(), 6);
+    assert_eq!(catalog_all.summary.total_artifacts, 6);
+    assert_eq!(catalog_all.summary.primary_artifacts, 5);
+    assert_eq!(catalog_all.summary.intermediate_artifacts, 1);
+    assert_eq!(catalog_all.summary.report_artifacts, 1);
+    assert_eq!(catalog_all.summary.image_artifacts, 2);
+    assert_eq!(catalog_all.summary.video_artifacts, 1);
+    assert_eq!(catalog_all.summary.audio_artifacts, 1);
+    assert_eq!(catalog_all.summary.data_artifacts, 1);
+    assert!(catalog_all.summary.total_size_bytes > 0);
+    assert_eq!(catalog_all.items[0].task_title, "B200 Multi-Modal Briefing");
+    assert_eq!(catalog_all.items[0].artifact.task_id, task.id);
+
+    // Lọc theo kind = Image: `total` chỉ tính 2 ảnh, nhưng `summary` vẫn giữ nguyên phân bố toàn bộ các tab
+    let catalog_images = task_mgr
+        .list_all_artifacts(&orchestrator_flow_rs::TaskArtifactFilter {
+            kind: Some(orchestrator_flow_rs::TaskArtifactKind::Image),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(catalog_images.total, 2);
+    assert_eq!(catalog_images.items.len(), 2);
+    assert_eq!(catalog_images.summary.total_artifacts, 6);
+    assert_eq!(catalog_images.summary.image_artifacts, 2);
+
+    // Lọc theo role = Intermediate + query = "benchmarks"
+    let catalog_intermediate = task_mgr
+        .list_artifacts(&orchestrator_flow_rs::TaskArtifactFilter {
+            role: Some(orchestrator_flow_rs::TaskArtifactRole::Intermediate),
+            query: Some("benchmarks".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(catalog_intermediate.total, 1);
+    assert_eq!(
+        catalog_intermediate.items[0].artifact.name,
+        "b200-benchmarks.json"
+    );
+
     task_mgr.shutdown().await.unwrap();
     orch.shutdown().await.unwrap();
 }

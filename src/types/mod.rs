@@ -7,7 +7,10 @@ mod schedule;
 mod scope;
 mod task;
 
-pub use artifact::{TaskArtifactDownload, TaskArtifactKind, TaskArtifactRole, TaskArtifactView};
+pub use artifact::{
+    TaskArtifactCatalogEntry, TaskArtifactCatalogPage, TaskArtifactCatalogSummary,
+    TaskArtifactDownload, TaskArtifactFilter, TaskArtifactKind, TaskArtifactRole, TaskArtifactView,
+};
 pub use event::{TaskEvent, TaskFeedItem, TaskSubscription};
 pub use execution::{
     TaskAgentMessageView, TaskAgentRunView, TaskAgentSessionView, TaskExecutionSummary,

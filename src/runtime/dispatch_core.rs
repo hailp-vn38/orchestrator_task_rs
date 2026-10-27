@@ -1,6 +1,7 @@
 //! Logic điều phối lõi trên `Arc<SharedTaskCore>`, dùng chung cho `TaskManager`, `Scheduler`,
 //! `AutoFlow` và các `HostTool`.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use llm_wiki::CollectionScope;
@@ -11,7 +12,8 @@ use crate::runtime::{compute_next_cron_ms, lock, parse_due_at_ms, watcher, Share
 use crate::store::{new_id, now_ms, NewScheduleRow, NewTaskRow, TerminalUpdate};
 use crate::types::{
     CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView, ScheduleActionKind,
-    ScheduleKind, ScheduleStatus, ScheduleView, TaskAgentMessageView, TaskArtifactDownload,
+    ScheduleKind, ScheduleStatus, ScheduleView, TaskAgentMessageView, TaskArtifactCatalogEntry,
+    TaskArtifactCatalogPage, TaskArtifactCatalogSummary, TaskArtifactDownload, TaskArtifactFilter,
     TaskArtifactKind, TaskArtifactRole, TaskArtifactView, TaskDetailView, TaskEvent, TaskScope,
     TaskSource, TaskStatus, TaskView, WikiDeleteOutcome,
 };
@@ -587,6 +589,203 @@ impl SharedTaskCore {
             .iter()
             .map(|fa| TaskArtifactView::from_family_artifact(&task.id, fa))
             .collect())
+    }
+
+    /// Truy vấn danh mục Artifact toàn cục (`Artifact Catalog`) từ tất cả `Orchestrator` flows,
+    /// kết nối với `TaskView` sở hữu trong `tasks.db`, hỗ trợ lọc, tìm kiếm, phân trang và tính `summary`.
+    pub(crate) async fn list_artifacts_catalog_internal(
+        &self,
+        scope: Option<&TaskScope>,
+        filter: &TaskArtifactFilter,
+    ) -> TaskResult<TaskArtifactCatalogPage> {
+        self.ensure_open()?;
+        if let Some(s) = scope {
+            s.validate()?;
+        }
+
+        let tasks = self.store.list_tasks_unbounded(scope).await?;
+        if tasks.is_empty() {
+            return Ok(TaskArtifactCatalogPage::default());
+        }
+
+        let mut tasks_by_session: HashMap<&str, Vec<&TaskView>> = HashMap::new();
+        for task in &tasks {
+            tasks_by_session
+                .entry(task.session_id.as_str())
+                .or_default()
+                .push(task);
+        }
+
+        let mut seen_orch_ptrs: HashSet<usize> = HashSet::new();
+        let mut seen_artifact_ids: HashSet<String> = HashSet::new();
+        let mut entries: Vec<TaskArtifactCatalogEntry> = Vec::new();
+
+        for (flow_id, orch) in self.flows()?.iter_flows() {
+            let ptr = Arc::as_ptr(orch) as usize;
+            if !seen_orch_ptrs.insert(ptr) {
+                continue;
+            }
+            let family_artifacts = orch.list_all_family_artifacts().await?;
+            for fa in family_artifacts {
+                if seen_artifact_ids.contains(&fa.artifact.id) {
+                    continue;
+                }
+                let Some(candidates) = tasks_by_session.get(fa.root_session_id.as_str()) else {
+                    continue;
+                };
+                let art_created_ms = if fa.created_at < 1_000_000_000_000 {
+                    fa.created_at.saturating_mul(1000)
+                } else {
+                    fa.created_at
+                };
+                let matched_task = candidates
+                    .iter()
+                    .copied()
+                    .find(|t| {
+                        t.flow_id == flow_id
+                            && t.latest_turn_id.as_deref() == Some(fa.turn_id.as_str())
+                    })
+                    .or_else(|| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|t| t.latest_turn_id.as_deref() == Some(fa.turn_id.as_str()))
+                    })
+                    .or_else(|| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|t| t.flow_id == flow_id && t.created_at <= art_created_ms)
+                    })
+                    .or_else(|| candidates.iter().copied().find(|t| t.flow_id == flow_id))
+                    .or_else(|| candidates.first().copied());
+
+                let Some(task) = matched_task else {
+                    continue;
+                };
+
+                seen_artifact_ids.insert(fa.artifact.id.clone());
+                let artifact = TaskArtifactView::from_family_artifact(&task.id, &fa);
+                entries.push(TaskArtifactCatalogEntry {
+                    artifact,
+                    task_title: task.title.clone(),
+                    task_prompt: task.prompt.clone(),
+                    task_status: task.status,
+                    flow_id: task.flow_id.clone(),
+                    root_agent_id: task.agent_id.clone(),
+                    owner_id: task.owner_id.clone(),
+                    workspace_id: task.workspace_id.clone(),
+                });
+            }
+        }
+
+        entries.sort_by(|a, b| {
+            b.artifact
+                .created_at
+                .cmp(&a.artifact.created_at)
+                .then_with(|| b.artifact.id.cmp(&a.artifact.id))
+        });
+
+        let task_id_filter = filter
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let flow_id_filter = filter
+            .flow_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let agent_id_filter = filter
+            .producer_agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let query_lower = filter
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_lowercase);
+
+        let base_matched: Vec<TaskArtifactCatalogEntry> = entries
+            .into_iter()
+            .filter(|entry| {
+                if let Some(tid) = task_id_filter {
+                    if entry.artifact.task_id != tid {
+                        return false;
+                    }
+                }
+                if let Some(fid) = flow_id_filter {
+                    if entry.flow_id != fid {
+                        return false;
+                    }
+                }
+                if let Some(aid) = agent_id_filter {
+                    if entry.artifact.producer_agent_id != aid {
+                        return false;
+                    }
+                }
+                if let Some(ref q) = query_lower {
+                    let matches_q = entry.artifact.name.to_lowercase().contains(q)
+                        || entry.artifact.id.to_lowercase().contains(q)
+                        || entry.artifact.mime_type.to_lowercase().contains(q)
+                        || entry.artifact.producer_agent_id.to_lowercase().contains(q)
+                        || entry
+                            .artifact
+                            .producer_tool_name
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(q)
+                        || entry.task_title.to_lowercase().contains(q)
+                        || entry.task_prompt.to_lowercase().contains(q)
+                        || entry.artifact.task_id.to_lowercase().contains(q);
+                    if !matches_q {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let mut summary = TaskArtifactCatalogSummary::default();
+        for entry in &base_matched {
+            summary.record(&entry.artifact);
+        }
+
+        let filtered: Vec<TaskArtifactCatalogEntry> = base_matched
+            .into_iter()
+            .filter(|entry| {
+                if let Some(kind) = filter.kind {
+                    if entry.artifact.kind != kind {
+                        return false;
+                    }
+                }
+                if let Some(role) = filter.role {
+                    if entry.artifact.role != role {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let total = u64::try_from(filtered.len()).unwrap_or(0);
+        let max_limit = self.config.runtime.page_size.max(500);
+        let limit = filter
+            .limit
+            .unwrap_or(self.config.runtime.page_size)
+            .clamp(1, max_limit) as usize;
+        let offset = filter.offset.unwrap_or(0) as usize;
+
+        let items = filtered.into_iter().skip(offset).take(limit).collect();
+
+        Ok(TaskArtifactCatalogPage {
+            items,
+            total,
+            summary,
+        })
     }
 
     /// Mở một Artifact thuộc về một Task để đọc/stream kèm xác minh toàn vẹn SHA-256.

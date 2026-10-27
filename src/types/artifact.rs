@@ -4,6 +4,7 @@ use orchestrator_agent_rs::{ArtifactReader, ArtifactRole, FamilyArtifact};
 use serde::{Deserialize, Serialize};
 
 use crate::error::TaskResult;
+use crate::types::TaskStatus;
 
 const STREAM_READ_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -37,6 +38,20 @@ impl TaskArtifactKind {
             Self::Document => "document",
             Self::Data => "data",
             Self::Other => "other",
+        }
+    }
+
+    /// Phân tích chuỗi tên loại Artifact (`report`, `image`, `video`, `audio`, `document`, `data`, `other`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "report" | "reports" | "markdown" => Some(Self::Report),
+            "image" | "images" => Some(Self::Image),
+            "video" | "videos" => Some(Self::Video),
+            "audio" | "tts" => Some(Self::Audio),
+            "document" | "documents" | "pdf" => Some(Self::Document),
+            "data" | "json" | "csv" => Some(Self::Data),
+            "other" => Some(Self::Other),
+            _ => None,
         }
     }
 
@@ -153,6 +168,15 @@ impl TaskArtifactRole {
         }
     }
 
+    /// Phân tích chuỗi vai trò Artifact (`primary`, `intermediate`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "primary" => Some(Self::Primary),
+            "intermediate" => Some(Self::Intermediate),
+            _ => None,
+        }
+    }
+
     pub fn from_agent_role(role: ArtifactRole) -> Self {
         match role {
             ArtifactRole::Primary => Self::Primary,
@@ -242,3 +266,75 @@ impl TaskArtifactDownload {
         Ok(self.reader.read_to_string().await?)
     }
 }
+
+/// Bộ lọc truy vấn danh mục Artifact toàn cục (`Artifact Catalog`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskArtifactFilter {
+    pub kind: Option<TaskArtifactKind>,
+    pub role: Option<TaskArtifactRole>,
+    pub task_id: Option<String>,
+    pub flow_id: Option<String>,
+    pub producer_agent_id: Option<String>,
+    pub query: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// Thống kê tổng hợp của danh mục Artifact (`Artifact Catalog`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskArtifactCatalogSummary {
+    pub total_artifacts: u64,
+    pub primary_artifacts: u64,
+    pub intermediate_artifacts: u64,
+    pub report_artifacts: u64,
+    pub image_artifacts: u64,
+    pub video_artifacts: u64,
+    pub audio_artifacts: u64,
+    pub document_artifacts: u64,
+    pub data_artifacts: u64,
+    pub other_artifacts: u64,
+    pub total_size_bytes: u64,
+}
+
+impl TaskArtifactCatalogSummary {
+    pub fn record(&mut self, artifact: &TaskArtifactView) {
+        self.total_artifacts += 1;
+        self.total_size_bytes = self.total_size_bytes.saturating_add(artifact.size_bytes);
+        match artifact.role {
+            TaskArtifactRole::Primary => self.primary_artifacts += 1,
+            TaskArtifactRole::Intermediate => self.intermediate_artifacts += 1,
+        }
+        match artifact.kind {
+            TaskArtifactKind::Report => self.report_artifacts += 1,
+            TaskArtifactKind::Image => self.image_artifacts += 1,
+            TaskArtifactKind::Video => self.video_artifacts += 1,
+            TaskArtifactKind::Audio => self.audio_artifacts += 1,
+            TaskArtifactKind::Document => self.document_artifacts += 1,
+            TaskArtifactKind::Data => self.data_artifacts += 1,
+            TaskArtifactKind::Other => self.other_artifacts += 1,
+        }
+    }
+}
+
+/// Một mục trong danh mục Artifact toàn cục (`Artifact Catalog`), kết hợp metadata của [`TaskArtifactView`]
+/// với ngữ cảnh của Task sở hữu (`task_title`, `task_prompt`, `task_status`, `flow_id`, `root_agent_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskArtifactCatalogEntry {
+    pub artifact: TaskArtifactView,
+    pub task_title: String,
+    pub task_prompt: String,
+    pub task_status: TaskStatus,
+    pub flow_id: String,
+    pub root_agent_id: String,
+    pub owner_id: String,
+    pub workspace_id: String,
+}
+
+/// Trang kết quả phân trang của danh mục Artifact toàn cục (`Artifact Catalog`) kèm thống kê tổng hợp.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskArtifactCatalogPage {
+    pub items: Vec<TaskArtifactCatalogEntry>,
+    pub total: u64,
+    pub summary: TaskArtifactCatalogSummary,
+}
+

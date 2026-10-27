@@ -9,8 +9,9 @@ use crate::error::TaskResult;
 use crate::manager::TaskManager;
 use crate::tools::TaskToolSuite;
 use crate::types::{
-    AgentCatalogEntry, TaskAgentMessageView, TaskArtifactDownload, TaskArtifactView,
-    TaskDetailView, TaskFilter, TaskPage, TaskScope, TaskSubscription, TaskView,
+    AgentCatalogEntry, TaskAgentMessageView, TaskArtifactCatalogPage, TaskArtifactDownload,
+    TaskArtifactFilter, TaskArtifactView, TaskDetailView, TaskFilter, TaskPage, TaskScope,
+    TaskSubscription, TaskView,
 };
 
 impl TaskManager {
@@ -192,6 +193,34 @@ impl TaskManager {
     ) -> TaskResult<Vec<TaskArtifactView>> {
         let scope = self.core.resolve_task_scope(task_id).await?;
         self.list_task_artifacts_scoped(&scope, task_id).await
+    }
+
+    /// Truy vấn danh mục Artifact toàn cục (`Artifact Catalog`) trong `default_scope`.
+    pub async fn list_artifacts(
+        &self,
+        filter: &TaskArtifactFilter,
+    ) -> TaskResult<TaskArtifactCatalogPage> {
+        let scope = &self.core.config.default_scope;
+        self.list_artifacts_scoped(scope, filter).await
+    }
+
+    /// Truy vấn danh mục Artifact toàn cục (`Artifact Catalog`) trong `TaskScope` chỉ định.
+    pub async fn list_artifacts_scoped(
+        &self,
+        scope: &TaskScope,
+        filter: &TaskArtifactFilter,
+    ) -> TaskResult<TaskArtifactCatalogPage> {
+        self.core
+            .list_artifacts_catalog_internal(Some(scope), filter)
+            .await
+    }
+
+    /// Truy vấn danh mục Artifact toàn cục (`Artifact Catalog`) trên toàn bộ `TaskScope` (cho Admin UI).
+    pub async fn list_all_artifacts(
+        &self,
+        filter: &TaskArtifactFilter,
+    ) -> TaskResult<TaskArtifactCatalogPage> {
+        self.core.list_artifacts_catalog_internal(None, filter).await
     }
 
     /// Mở một Artifact thuộc về một Task trong `default_scope` để đọc/stream kèm xác minh SHA-256.

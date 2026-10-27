@@ -70,6 +70,22 @@ impl TaskStore {
         self.list_tasks_internal(None, filter, max_page_size).await
     }
 
+    pub(crate) async fn list_tasks_unbounded(
+        &self,
+        scope: Option<&TaskScope>,
+    ) -> TaskResult<Vec<TaskView>> {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("SELECT * FROM tasks WHERE 1=1");
+        apply_scope_clause(&mut qb, scope);
+        qb.push(" ORDER BY created_at DESC");
+        let rows = qb
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err("list tasks unbounded"))?;
+        Ok(rows.iter().map(map_task_row).collect())
+    }
+
     async fn list_tasks_internal(
         &self,
         scope: Option<&TaskScope>,

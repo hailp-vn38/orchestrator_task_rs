@@ -37,4 +37,9 @@ The `(owner_id, workspace_id)` identity pair that isolates Tasks and Schedules (
 _Avoid_: Tenant, Account, Namespace
 
 **Task Artifact**:
-An immutable, SHA-256 verified file (`Report`, `Image`, `Audio`/TTS, `Document`, `Data`, or `Other`) produced by a Root Agent or Subagent tool (`markdown_create`, `image_create`, `tts_synthesize`, `artifact_create`) within a Task's session family and exposed via `TaskDetailView.artifacts` and `TaskManager::open_task_artifact*`.
+An immutable, integrity-verified deliverable or intermediate file produced by a Root Agent or Subagent during a Task's execution and owned by that Task's session family.
+_Avoid_: Scratch File, Tool Output String, Unverified Attachment
+
+**Artifact Catalog**:
+A cross-task read view of committed Task Artifacts enriched with their originating Task context and aggregated counts by semantic kind and role.
+_Avoid_: File System Browser, Raw Storage Dump, Media Bucket

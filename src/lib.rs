@@ -86,8 +86,9 @@ pub use types::{
     AgentCatalogEntry, CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView,
     Priority, ScheduleActionKind, ScheduleFilter, ScheduleKind, ScheduleSessionMode,
     ScheduleStatus, ScheduleView, TaskAgentMessageView, TaskAgentRunView, TaskAgentSessionView,
-    TaskArtifactDownload, TaskArtifactKind, TaskArtifactRole, TaskArtifactView, TaskDetailView,
-    TaskEvent, TaskExecutionSummary, TaskFeedItem, TaskFilter, TaskMessageToolCallView, TaskPage,
-    TaskScope, TaskSource, TaskStatus, TaskSubscription, TaskToolInvocationView, TaskView,
-    WikiDeleteOutcome, DEFAULT_OWNER_ID, DEFAULT_WORKSPACE_ID,
+    TaskArtifactCatalogEntry, TaskArtifactCatalogPage, TaskArtifactCatalogSummary,
+    TaskArtifactDownload, TaskArtifactFilter, TaskArtifactKind, TaskArtifactRole, TaskArtifactView,
+    TaskDetailView, TaskEvent, TaskExecutionSummary, TaskFeedItem, TaskFilter,
+    TaskMessageToolCallView, TaskPage, TaskScope, TaskSource, TaskStatus, TaskSubscription,
+    TaskToolInvocationView, TaskView, WikiDeleteOutcome, DEFAULT_OWNER_ID, DEFAULT_WORKSPACE_ID,
 };

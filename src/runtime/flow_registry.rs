@@ -83,6 +83,10 @@ impl FlowRegistry {
             .ok_or_else(|| TaskError::not_found(format!("flow '{flow_id}' not found")))
     }
 
+    pub(crate) fn iter_flows(&self) -> impl Iterator<Item = (&str, &Arc<Orchestrator>)> {
+        self.flows.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
     pub(crate) fn catalog(&self) -> &[AgentCatalogEntry] {
         &self.catalog
     }
