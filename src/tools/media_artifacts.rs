@@ -28,6 +28,17 @@ pub const DEFAULT_SVG_HEIGHT: u32 = 675;
 pub const DEFAULT_VIDEO_WIDTH: u32 = 640;
 /// Chiều cao mặc định cho video clip MP4 (`360` px).
 pub const DEFAULT_VIDEO_HEIGHT: u32 = 360;
+/// Số lượng ảnh tham chiếu tối đa cho một lệnh `image_create`.
+pub const MAX_IMAGE_REFERENCES: usize = 4;
+/// Giới hạn kích thước mỗi ảnh tham chiếu (10 MiB).
+pub const MAX_REFERENCE_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Ảnh tham chiếu đã được xác minh toàn vẹn để chuyển xuống Backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceImageInput {
+    pub bytes: Vec<u8>,
+    pub mime_type: String,
+}
 
 /// Yêu cầu sinh hình ảnh gửi tới [`ImageGeneratorBackend`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +51,10 @@ pub struct ImageGenerationRequest {
     pub width: u32,
     pub height: u32,
     pub svg_content: Option<String>,
+    #[serde(default)]
+    pub reference_images: Vec<ReferenceImageInput>,
+    #[serde(default)]
+    pub transparent_background: bool,
 }
 
 impl ImageGenerationRequest {
@@ -194,6 +209,8 @@ pub struct VideoGenerationRequest {
     pub width: u32,
     pub height: u32,
     pub duration_secs: u32,
+    #[serde(default)]
+    pub first_frame: Option<ReferenceImageInput>,
 }
 
 impl VideoGenerationRequest {
@@ -408,6 +425,22 @@ impl HostTool for ImageCreateTool {
                         "type": "string",
                         "description": "Optional raw SVG markup (<svg ...>...</svg>) when authoring custom vector diagrams."
                     },
+                    "reference_artifact_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": 4,
+                        "description": "Optional list of up to 4 image Artifact IDs in the current task to use as visual references."
+                    },
+                    "reference_images": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": 4,
+                        "description": "Optional list of up to 4 reference images as data:image/...;base64,... strings."
+                    },
+                    "transparent_background": {
+                        "type": "boolean",
+                        "description": "Optional flag to request an isolated subject with a transparent PNG background."
+                    },
                     "role": {
                         "type": "string",
                         "enum": ["primary", "intermediate"],
@@ -464,7 +497,12 @@ impl HostTool for ImageCreateTool {
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
+        let transparent_background = args
+            .get("transparent_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let role = parse_role(args.get("role").and_then(Value::as_str));
+        let reference_images = resolve_image_references_from_args(Some(&ctx), &args).await?;
 
         let mut req = ImageGenerationRequest {
             prompt: prompt.to_string(),
@@ -474,6 +512,8 @@ impl HostTool for ImageCreateTool {
             width: raw_width,
             height: raw_height,
             svg_content,
+            reference_images,
+            transparent_background,
         };
         let (width, height) = req.effective_dimensions();
         req.width = width;
@@ -599,6 +639,14 @@ impl HostTool for VideoCreateTool {
                         "type": "integer",
                         "description": "Video duration in seconds (1 to 60, default: 4)."
                     },
+                    "first_frame_artifact_id": {
+                        "type": "string",
+                        "description": "Optional image Artifact ID in the current task to use as the starting frame of the video."
+                    },
+                    "first_frame_image": {
+                        "type": "string",
+                        "description": "Optional starting frame image as a data:image/...;base64,... string."
+                    },
                     "role": {
                         "type": "string",
                         "enum": ["primary", "intermediate"],
@@ -643,6 +691,7 @@ impl HostTool for VideoCreateTool {
             .unwrap_or(4)
             .clamp(1, 60);
         let role = parse_role(args.get("role").and_then(Value::as_str));
+        let first_frame = resolve_first_frame_from_args(Some(&ctx), &args).await?;
 
         let mut req = VideoGenerationRequest {
             prompt: prompt.to_string(),
@@ -651,6 +700,7 @@ impl HostTool for VideoCreateTool {
             width: raw_width,
             height: raw_height,
             duration_secs,
+            first_frame,
         };
         let (width, height) = req.effective_dimensions();
         req.width = width;
@@ -1072,6 +1122,279 @@ fn decode_hex(hex_str: &str) -> Result<Vec<u8>, String> {
             .to_digit(16)
             .ok_or_else(|| "invalid hex character".to_string())?;
         out.push(((hi << 4) | lo) as u8);
+    }
+    Ok(out)
+}
+
+pub(crate) async fn resolve_image_references_from_args(
+    ctx: Option<&ToolContext>,
+    args: &Value,
+) -> Result<Vec<ReferenceImageInput>, ToolError> {
+    let mut out = Vec::new();
+
+    if let Some(arr) = args.get("reference_artifact_ids").and_then(Value::as_array) {
+        if arr.len() > MAX_IMAGE_REFERENCES {
+            return Err(host_tool_err(
+                "TOO_MANY_REFERENCE_IMAGES",
+                format!("At most {MAX_IMAGE_REFERENCES} reference images are allowed"),
+            ));
+        }
+        let tool_ctx = ctx.ok_or_else(|| {
+            host_tool_err(
+                "ARTIFACT_UNAVAILABLE",
+                "ToolContext is required to resolve reference_artifact_ids",
+            )
+        })?;
+        for item in arr {
+            let id = item
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    host_tool_err(
+                        "INVALID_ARGUMENT",
+                        "reference_artifact_ids entries must be non-empty strings",
+                    )
+                })?;
+            out.push(resolve_artifact_image(tool_ctx, id).await?);
+        }
+    }
+
+    if let Some(arr) = args.get("reference_images").and_then(Value::as_array) {
+        for item in arr {
+            let raw = item
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    host_tool_err(
+                        "INVALID_ARGUMENT",
+                        "reference_images entries must be non-empty data URL or base64 strings",
+                    )
+                })?;
+            out.push(decode_data_url_or_base64_image(raw)?);
+        }
+    }
+
+    if out.len() > MAX_IMAGE_REFERENCES {
+        return Err(host_tool_err(
+            "TOO_MANY_REFERENCE_IMAGES",
+            format!("At most {MAX_IMAGE_REFERENCES} reference images are allowed"),
+        ));
+    }
+
+    Ok(out)
+}
+
+pub(crate) async fn resolve_first_frame_from_args(
+    ctx: Option<&ToolContext>,
+    args: &Value,
+) -> Result<Option<ReferenceImageInput>, ToolError> {
+    let artifact_id = args
+        .get("first_frame_artifact_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let inline_img = args
+        .get("first_frame_image")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if artifact_id.is_some() && inline_img.is_some() {
+        return Err(host_tool_err(
+            "INVALID_ARGUMENT",
+            "Specify at most one of first_frame_artifact_id or first_frame_image",
+        ));
+    }
+
+    if let Some(id) = artifact_id {
+        let tool_ctx = ctx.ok_or_else(|| {
+            host_tool_err(
+                "ARTIFACT_UNAVAILABLE",
+                "ToolContext is required to resolve first_frame_artifact_id",
+            )
+        })?;
+        return Ok(Some(resolve_artifact_image(tool_ctx, id).await?));
+    }
+
+    if let Some(raw) = inline_img {
+        return Ok(Some(decode_data_url_or_base64_image(raw)?));
+    }
+
+    Ok(None)
+}
+
+async fn resolve_artifact_image(
+    ctx: &ToolContext,
+    artifact_id: &str,
+) -> Result<ReferenceImageInput, ToolError> {
+    let reader = ctx.artifacts().open(artifact_id).await?;
+    let meta = reader.metadata();
+    if meta.size_bytes > MAX_REFERENCE_IMAGE_BYTES {
+        return Err(host_tool_err(
+            "REFERENCE_IMAGE_TOO_LARGE",
+            format!(
+                "Reference artifact '{}' exceeds limit of {} bytes",
+                artifact_id, MAX_REFERENCE_IMAGE_BYTES
+            ),
+        ));
+    }
+    let declared_mime = meta.mime_type.clone();
+    let bytes = reader
+        .read_all()
+        .await
+        .map_err(|e| host_tool_err("ARTIFACT_INTEGRITY", e.to_string()))?;
+    let mime_type = sniff_raster_image_mime(&bytes).ok_or_else(|| {
+        host_tool_err(
+            "UNSUPPORTED_REFERENCE_IMAGE",
+            format!(
+                "Artifact '{}' (mime={}) is not a supported raster image (png/jpeg/webp/gif)",
+                artifact_id, declared_mime
+            ),
+        )
+    })?;
+    Ok(ReferenceImageInput {
+        bytes,
+        mime_type: mime_type.to_string(),
+    })
+}
+
+fn decode_data_url_or_base64_image(raw: &str) -> Result<ReferenceImageInput, ToolError> {
+    let trimmed = raw.trim();
+    let (declared_mime, b64_part) = if let Some(rest) = trimmed.strip_prefix("data:") {
+        let Some((header, payload)) = rest.split_once(',') else {
+            return Err(host_tool_err("INVALID_ARGUMENT", "Malformed data URL"));
+        };
+        let mime = header
+            .split(';')
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        (mime, payload.trim())
+    } else {
+        (None, trimmed)
+    };
+
+    let bytes = decode_base64(b64_part)
+        .map_err(|e| host_tool_err("INVALID_ARGUMENT", format!("Invalid base64 image: {e}")))?;
+    if bytes.is_empty() {
+        return Err(host_tool_err(
+            "INVALID_ARGUMENT",
+            "Reference image bytes cannot be empty",
+        ));
+    }
+    if (bytes.len() as u64) > MAX_REFERENCE_IMAGE_BYTES {
+        return Err(host_tool_err(
+            "REFERENCE_IMAGE_TOO_LARGE",
+            format!(
+                "Reference image exceeds limit of {} bytes",
+                MAX_REFERENCE_IMAGE_BYTES
+            ),
+        ));
+    }
+    let mime_type = sniff_raster_image_mime(&bytes).ok_or_else(|| {
+        host_tool_err(
+            "UNSUPPORTED_REFERENCE_IMAGE",
+            "Reference image must be a valid raster image (png, jpeg, webp, or gif)",
+        )
+    })?;
+    let _ = declared_mime;
+    Ok(ReferenceImageInput {
+        bytes,
+        mime_type: mime_type.to_string(),
+    })
+}
+
+fn sniff_raster_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    None
+}
+
+#[cfg(test)]
+pub(crate) fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub(crate) fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let mut sextets = Vec::with_capacity(input.len());
+    let mut pad = 0usize;
+    for b in input.bytes() {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        if b == b'=' {
+            pad += 1;
+            continue;
+        }
+        if pad > 0 {
+            return Err("unexpected character after base64 padding".to_string());
+        }
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return Err("invalid base64 character".to_string()),
+        };
+        sextets.push(val);
+    }
+    let mut out = Vec::with_capacity((sextets.len() * 3) / 4);
+    let mut i = 0;
+    while i + 4 <= sextets.len() {
+        let s0 = sextets[i];
+        let s1 = sextets[i + 1];
+        let s2 = sextets[i + 2];
+        let s3 = sextets[i + 3];
+        out.push((s0 << 2) | (s1 >> 4));
+        out.push((s1 << 4) | (s2 >> 2));
+        out.push((s2 << 6) | s3);
+        i += 4;
+    }
+    let rem = sextets.len() - i;
+    if rem == 1 {
+        return Err("invalid base64 length".to_string());
+    } else if rem == 2 {
+        let s0 = sextets[i];
+        let s1 = sextets[i + 1];
+        out.push((s0 << 2) | (s1 >> 4));
+    } else if rem == 3 {
+        let s0 = sextets[i];
+        let s1 = sextets[i + 1];
+        let s2 = sextets[i + 2];
+        out.push((s0 << 2) | (s1 >> 4));
+        out.push((s1 << 4) | (s2 >> 2));
     }
     Ok(out)
 }

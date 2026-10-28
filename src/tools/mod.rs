@@ -28,10 +28,11 @@ pub use media_artifacts::{
     media_host_tools, media_host_tools_with_video, ArtifactCreateTool,
     DefaultImageGeneratorBackend, DefaultTtsSynthesizerBackend, DefaultVideoGeneratorBackend,
     GeneratedImagePayload, GeneratedVideoPayload, ImageCreateTool, ImageGenerationRequest,
-    ImageGeneratorBackend, SynthesizedAudioPayload, TtsSynthesisRequest, TtsSynthesizeTool,
-    TtsSynthesizerBackend, VideoCreateTool, VideoGenerationRequest, VideoGeneratorBackend,
-    DEFAULT_PNG_HEIGHT, DEFAULT_PNG_WIDTH, DEFAULT_SVG_HEIGHT, DEFAULT_SVG_WIDTH,
-    DEFAULT_VIDEO_HEIGHT, DEFAULT_VIDEO_WIDTH,
+    ImageGeneratorBackend, ReferenceImageInput, SynthesizedAudioPayload, TtsSynthesisRequest,
+    TtsSynthesizeTool, TtsSynthesizerBackend, VideoCreateTool, VideoGenerationRequest,
+    VideoGeneratorBackend, DEFAULT_PNG_HEIGHT, DEFAULT_PNG_WIDTH, DEFAULT_SVG_HEIGHT,
+    DEFAULT_SVG_WIDTH, DEFAULT_VIDEO_HEIGHT, DEFAULT_VIDEO_WIDTH, MAX_IMAGE_REFERENCES,
+    MAX_REFERENCE_IMAGE_BYTES,
 };
 pub use pdf::{
     build_sample_technical_pdf, convert_document_with_anydoc, pdf_host_tools, AnydocInspectPdfTool,
