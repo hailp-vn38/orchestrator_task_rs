@@ -598,6 +598,24 @@ async fn video_create_registers_multiple_clips_as_intermediate_and_video_concat_
         assert_eq!(inspect_mp4_duration_secs(&bytes), Some(10));
     }
 
+    // Verify the `video_create` invocation metadata persisted in the snapshot includes
+    // `total_duration_secs == 60`, `requires_concat == true`, `clip_count == 6`, and `provider_message`.
+    let snap = orch.snapshot(&caller, &session_id).await.unwrap();
+    let vid_inv = snap
+        .root
+        .invocations
+        .iter()
+        .find(|i| i.tool_name == "video_create")
+        .expect("video_create invocation persisted");
+    let meta = &vid_inv.result.as_ref().expect("video_create result")["metadata"];
+    assert_eq!(meta["total_duration_secs"], 60);
+    assert_eq!(meta["requires_concat"], true);
+    assert_eq!(meta["clip_count"], 6);
+    assert_eq!(
+        meta["provider_message"],
+        "Tôi sẽ tạo bộ video 6 phân cảnh (60s):\n- Phân cảnh 1..6"
+    );
+
     let clip_ids: Vec<String> = clip_arts.iter().map(|a| a.id.clone()).collect();
     gw.push_tool_calls(
         "Concatenating 6 clips into final primary video",

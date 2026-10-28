@@ -293,22 +293,6 @@ pub struct GeneratedVideoPayload {
 }
 
 impl GeneratedVideoPayload {
-    /// Chuẩn hóa danh sách các clip trả về (nếu `clips` rỗng thì lấy clip đơn lẻ từ `bytes`).
-    pub fn effective_clips(&self) -> Vec<GeneratedVideoClip> {
-        if !self.clips.is_empty() {
-            return self.clips.clone();
-        }
-        vec![GeneratedVideoClip {
-            filename: self.filename.clone(),
-            mime_type: self.mime_type.clone(),
-            bytes: self.bytes.clone(),
-            width: self.width,
-            height: self.height,
-            duration_secs: inspect_mp4_duration_secs(&self.bytes)
-                .unwrap_or_else(|| self.duration_secs.max(1)),
-        }]
-    }
-
     /// Tiêu thụ trực tiếp danh sách clip từ payload mà không sao chép lại các bộ đệm MP4 đa-MB.
     pub fn take_effective_clips(&mut self) -> Vec<GeneratedVideoClip> {
         if !self.clips.is_empty() {
@@ -326,6 +310,34 @@ impl GeneratedVideoPayload {
             duration_secs,
         }]
     }
+}
+
+/// Chuẩn hóa tên file gốc của video (cắt hậu tố `.mp4`/`.webm`/`.mov` và `slugify` tối đa 64 ký tự).
+pub fn normalize_video_stem(filename: &str, fallback: &str) -> String {
+    let stem = slugify(
+        filename
+            .trim_end_matches(".mp4")
+            .trim_end_matches(".webm")
+            .trim_end_matches(".mov"),
+        64,
+    );
+    if stem.is_empty() {
+        fallback.to_string()
+    } else {
+        stem
+    }
+}
+
+fn mirror_artifact_to_dir(
+    output_dir: Option<&PathBuf>,
+    filename: &str,
+    bytes: &[u8],
+) -> Option<String> {
+    let dir = output_dir?;
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join(filename);
+    std::fs::write(&path, bytes).ok()?;
+    Some(path.display().to_string())
 }
 
 /// Trait mở rộng cho phép Host cắm bất kỳ engine tạo video nào (OpenAI Sora/Videos, Muse, ComfyUI, Wan, HunyuanVideo, hoặc Local Renderer).
@@ -355,14 +367,7 @@ impl VideoGeneratorBackend for DefaultVideoGeneratorBackend {
         let (width, height) = req.effective_dimensions();
         let duration_secs = req.duration_secs.clamp(1, 60);
         let mp4_bytes = encode_minimal_mp4(&req.prompt, width, height, duration_secs);
-        let stem = slugify(
-            req.filename
-                .trim_end_matches(".mp4")
-                .trim_end_matches(".webm")
-                .trim_end_matches(".mov"),
-            64,
-        );
-        let safe_name = format!("{}.mp4", if stem.is_empty() { "video" } else { &stem });
+        let safe_name = format!("{}.mp4", normalize_video_stem(&req.filename, "video"));
         Ok(GeneratedVideoPayload {
             filename: safe_name,
             mime_type: "video/mp4".to_string(),
@@ -613,15 +618,11 @@ impl HostTool for ImageCreateTool {
             .await
             .map_err(|e| host_tool_err("IMAGE_GENERATION_FAILED", e))?;
 
-        let mut mirrored_path = None;
-        if let Some(ref dir) = self.output_dir {
-            if std::fs::create_dir_all(dir).is_ok() {
-                let p = dir.join(&generated.filename);
-                if std::fs::write(&p, &generated.bytes).is_ok() {
-                    mirrored_path = Some(p.display().to_string());
-                }
-            }
-        }
+        let mirrored_path = mirror_artifact_to_dir(
+            self.output_dir.as_ref(),
+            &generated.filename,
+            &generated.bytes,
+        );
 
         let artifact = ctx
             .artifacts()
@@ -818,18 +819,7 @@ impl HostTool for VideoCreateTool {
 
         let clips = generated.take_effective_clips();
         let is_multi_clip = clips.len() > 1;
-        let base_stem = slugify(
-            filename
-                .trim_end_matches(".mp4")
-                .trim_end_matches(".webm")
-                .trim_end_matches(".mov"),
-            64,
-        );
-        let safe_stem = if base_stem.is_empty() {
-            "video".to_string()
-        } else {
-            base_stem
-        };
+        let safe_stem = normalize_video_stem(filename, "video");
 
         let mut artifact_ids = Vec::with_capacity(clips.len());
         let mut clip_entries = Vec::with_capacity(clips.len());
@@ -854,15 +844,8 @@ impl HostTool for VideoCreateTool {
                 inspect_mp4_duration_secs(&clip.bytes).unwrap_or_else(|| clip.duration_secs.max(1));
             total_duration_secs = total_duration_secs.saturating_add(clip_duration);
 
-            let mut mirrored_path = None;
-            if let Some(ref dir) = self.output_dir {
-                if std::fs::create_dir_all(dir).is_ok() {
-                    let p = dir.join(&clip_filename);
-                    if std::fs::write(&p, &clip.bytes).is_ok() {
-                        mirrored_path = Some(p.display().to_string());
-                    }
-                }
-            }
+            let mirrored_path =
+                mirror_artifact_to_dir(self.output_dir.as_ref(), &clip_filename, &clip.bytes);
             if idx == 0 {
                 first_mirrored_path = mirrored_path.clone();
             }
@@ -1020,21 +1003,7 @@ impl VideoConcatBackend for DefaultVideoConcatBackend {
         if req.clips.len() < 2 {
             return Err("At least 2 video clips are required for concatenation".to_string());
         }
-        let stem = slugify(
-            req.filename
-                .trim_end_matches(".mp4")
-                .trim_end_matches(".webm")
-                .trim_end_matches(".mov"),
-            64,
-        );
-        let safe_name = format!(
-            "{}.mp4",
-            if stem.is_empty() {
-                "video-merged"
-            } else {
-                &stem
-            }
-        );
+        let safe_name = format!("{}.mp4", normalize_video_stem(&req.filename, "video-merged"));
         let sum_duration: u32 = req
             .clips
             .iter()
@@ -1333,15 +1302,8 @@ impl HostTool for VideoConcatTool {
             .await
             .map_err(|e| host_tool_err("VIDEO_CONCAT_FAILED", e))?;
 
-        let mut mirrored_path = None;
-        if let Some(ref dir) = self.output_dir {
-            if std::fs::create_dir_all(dir).is_ok() {
-                let p = dir.join(&merged.filename);
-                if std::fs::write(&p, &merged.bytes).is_ok() {
-                    mirrored_path = Some(p.display().to_string());
-                }
-            }
-        }
+        let mirrored_path =
+            mirror_artifact_to_dir(self.output_dir.as_ref(), &merged.filename, &merged.bytes);
 
         let artifact = ctx
             .artifacts()
@@ -1500,15 +1462,11 @@ impl HostTool for TtsSynthesizeTool {
             .await
             .map_err(|e| host_tool_err("TTS_SYNTHESIS_FAILED", e))?;
 
-        let mut mirrored_path = None;
-        if let Some(ref dir) = self.output_dir {
-            if std::fs::create_dir_all(dir).is_ok() {
-                let p = dir.join(&synthesized.filename);
-                if std::fs::write(&p, &synthesized.bytes).is_ok() {
-                    mirrored_path = Some(p.display().to_string());
-                }
-            }
-        }
+        let mirrored_path = mirror_artifact_to_dir(
+            self.output_dir.as_ref(),
+            &synthesized.filename,
+            &synthesized.bytes,
+        );
 
         let artifact = ctx
             .artifacts()
@@ -1641,15 +1599,8 @@ impl HostTool for ArtifactCreateTool {
         };
 
         let kind = TaskArtifactKind::from_mime_and_name(mime_type, filename);
-        let mut mirrored_path = None;
-        if let Some(ref dir) = self.output_dir {
-            if std::fs::create_dir_all(dir).is_ok() {
-                let p = dir.join(filename);
-                if std::fs::write(&p, &payload_bytes).is_ok() {
-                    mirrored_path = Some(p.display().to_string());
-                }
-            }
-        }
+        let mirrored_path =
+            mirror_artifact_to_dir(self.output_dir.as_ref(), filename, &payload_bytes);
         let artifact = ctx
             .artifacts()
             .put(ArtifactInput::from_bytes(
