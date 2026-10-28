@@ -137,7 +137,12 @@ impl ImageGeneratorBackend for DefaultImageGeneratorBackend {
 
         if req.is_svg() {
             let (svg, final_w, final_h) = match req.svg_content {
-                Some(ref raw) if raw.trim().get(..4).is_some_and(|p| p.eq_ignore_ascii_case("<svg")) => {
+                Some(ref raw)
+                    if raw
+                        .trim()
+                        .get(..4)
+                        .is_some_and(|p| p.eq_ignore_ascii_case("<svg")) =>
+                {
                     ensure_svg_root_dimensions(raw.trim(), width, height)
                 }
                 Some(ref inner) => (
@@ -233,6 +238,44 @@ impl VideoGenerationRequest {
     }
 }
 
+/// Giới hạn thời lượng và số lượng clip theo provider hiện hành của công cụ `video_create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoProviderConstraints {
+    /// Nhãn hiển thị của provider/adapter đang kích hoạt (ví dụ: `"Muse Web Gateway (model: muse-video)"`).
+    pub provider_label: String,
+    /// Thời lượng tối đa (giây) của MỘT video clip đơn lẻ do provider tạo ra.
+    pub max_clip_duration_secs: u32,
+    /// Số lượng video clip tối đa mà provider có thể sinh ra trong MỘT lần gọi `video_create`.
+    pub max_clips_per_call: u32,
+    /// Tổng thời lượng tối đa (giây) có thể yêu cầu trong một lần gọi `video_create`.
+    pub max_total_duration_secs: u32,
+    /// Hướng dẫn điều phối cụ thể cho Agent khi dùng provider này.
+    pub provider_guidance: String,
+}
+
+impl Default for VideoProviderConstraints {
+    fn default() -> Self {
+        Self {
+            provider_label: "builtin_mp4_renderer".to_string(),
+            max_clip_duration_secs: 60,
+            max_clips_per_call: 1,
+            max_total_duration_secs: 60,
+            provider_guidance: "Creates a single MP4 clip up to 60 seconds per call.".to_string(),
+        }
+    }
+}
+
+/// Một phân cảnh video MP4 đơn lẻ do provider trả về.
+#[derive(Debug, Clone)]
+pub struct GeneratedVideoClip {
+    pub filename: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub duration_secs: u32,
+}
+
 /// Kết quả video sinh ra từ [`VideoGeneratorBackend`].
 #[derive(Debug, Clone)]
 pub struct GeneratedVideoPayload {
@@ -243,11 +286,55 @@ pub struct GeneratedVideoPayload {
     pub height: u32,
     pub duration_secs: u32,
     pub provider: String,
+    /// Danh sách toàn bộ các clip phân cảnh (`1..=N`) nếu provider trả về nhiều clip trong 1 lần gọi.
+    pub clips: Vec<GeneratedVideoClip>,
+    /// Toàn bộ tin nhắn kịch bản/phân cảnh do provider trả về kèm theo video.
+    pub provider_message: Option<String>,
 }
 
-/// Trait mở rộng cho phép Host cắm bất kỳ engine tạo video nào (OpenAI Sora/Videos, ComfyUI, Wan, HunyuanVideo, hoặc Local Renderer).
+impl GeneratedVideoPayload {
+    /// Chuẩn hóa danh sách các clip trả về (nếu `clips` rỗng thì lấy clip đơn lẻ từ `bytes`).
+    pub fn effective_clips(&self) -> Vec<GeneratedVideoClip> {
+        if !self.clips.is_empty() {
+            return self.clips.clone();
+        }
+        vec![GeneratedVideoClip {
+            filename: self.filename.clone(),
+            mime_type: self.mime_type.clone(),
+            bytes: self.bytes.clone(),
+            width: self.width,
+            height: self.height,
+            duration_secs: inspect_mp4_duration_secs(&self.bytes)
+                .unwrap_or_else(|| self.duration_secs.max(1)),
+        }]
+    }
+
+    /// Tiêu thụ trực tiếp danh sách clip từ payload mà không sao chép lại các bộ đệm MP4 đa-MB.
+    pub fn take_effective_clips(&mut self) -> Vec<GeneratedVideoClip> {
+        if !self.clips.is_empty() {
+            return std::mem::take(&mut self.clips);
+        }
+        let bytes = std::mem::take(&mut self.bytes);
+        let duration_secs =
+            inspect_mp4_duration_secs(&bytes).unwrap_or_else(|| self.duration_secs.max(1));
+        vec![GeneratedVideoClip {
+            filename: self.filename.clone(),
+            mime_type: self.mime_type.clone(),
+            bytes,
+            width: self.width,
+            height: self.height,
+            duration_secs,
+        }]
+    }
+}
+
+/// Trait mở rộng cho phép Host cắm bất kỳ engine tạo video nào (OpenAI Sora/Videos, Muse, ComfyUI, Wan, HunyuanVideo, hoặc Local Renderer).
 #[async_trait::async_trait]
 pub trait VideoGeneratorBackend: Send + Sync {
+    fn video_constraints(&self) -> VideoProviderConstraints {
+        VideoProviderConstraints::default()
+    }
+
     async fn generate_video(
         &self,
         req: &VideoGenerationRequest,
@@ -255,7 +342,7 @@ pub trait VideoGeneratorBackend: Send + Sync {
 }
 
 /// Backend tạo video mặc định tự chủ: kết xuất container ISO BMFF / MP4 (`video/mp4`) hợp lệ
-/// mang metadata `ftypisom` + `mdat` để kiểm thử và chạy offline không cần GPU rời.
+/// mang metadata `ftypisom` + `moov/mvhd` + `mdat` để kiểm thử và chạy offline không cần GPU rời.
 #[derive(Debug, Clone, Default)]
 pub struct DefaultVideoGeneratorBackend;
 
@@ -284,6 +371,8 @@ impl VideoGeneratorBackend for DefaultVideoGeneratorBackend {
             height,
             duration_secs,
             provider: "builtin_mp4_renderer".to_string(),
+            clips: Vec::new(),
+            provider_message: None,
         })
     }
 }
@@ -473,13 +562,12 @@ impl HostTool for ImageCreateTool {
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .map(str::to_string);
-        let inferred_fmt = if filename.trim().to_ascii_lowercase().ends_with(".svg")
-            || svg_content.is_some()
-        {
-            "svg"
-        } else {
-            "png"
-        };
+        let inferred_fmt =
+            if filename.trim().to_ascii_lowercase().ends_with(".svg") || svg_content.is_some() {
+                "svg"
+            } else {
+                "png"
+            };
         let format = args
             .get("format")
             .and_then(Value::as_str)
@@ -608,9 +696,19 @@ impl Default for VideoCreateTool {
 #[async_trait::async_trait]
 impl HostTool for VideoCreateTool {
     fn descriptor(&self) -> ToolDescriptor {
+        let c = self.backend.video_constraints();
+        let max_total = c.max_total_duration_secs.max(1);
+        let max_clip = c.max_clip_duration_secs.max(1);
+        let max_clips = c.max_clips_per_call.max(1);
+
         ToolDescriptor {
             name: "video_create".to_string(),
-            description: "Generate a short illustration or explainer video (MP4) from a visual prompt and publish it as a Task Artifact.".to_string(),
+            description: format!(
+                "Generate a short illustration or explainer video (MP4) from a visual prompt and publish it as a Task Artifact. \
+                 [Active provider: {label} | max_clip_duration_secs={max_clip}s | max_clips_per_call={max_clips} | max_total_duration_secs={max_total}s. {guidance}]",
+                label = c.provider_label,
+                guidance = c.provider_guidance,
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["filename", "prompt"],
@@ -637,7 +735,12 @@ impl HostTool for VideoCreateTool {
                     },
                     "duration_secs": {
                         "type": "integer",
-                        "description": "Video duration in seconds (1 to 60, default: 4)."
+                        "minimum": 1,
+                        "maximum": max_total,
+                        "description": format!(
+                            "Video duration in seconds (1 to {max_total}, default: 4; active provider '{}' generates up to {max_clip}s per single clip and up to {max_clips} clip(s) per call).",
+                            c.provider_label
+                        )
                     },
                     "first_frame_artifact_id": {
                         "type": "string",
@@ -650,7 +753,7 @@ impl HostTool for VideoCreateTool {
                     "role": {
                         "type": "string",
                         "enum": ["primary", "intermediate"],
-                        "description": "Artifact visibility role (default: 'primary')."
+                        "description": "Artifact visibility role (default: 'primary' for single-clip output; multi-clip parts are stored as 'intermediate' until merged with `video_concat`)."
                     }
                 },
                 "additionalProperties": false
@@ -684,13 +787,14 @@ impl HostTool for VideoCreateTool {
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
+        let constraints = self.backend.video_constraints();
         let duration_secs = args
             .get("duration_secs")
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(4)
-            .clamp(1, 60);
-        let role = parse_role(args.get("role").and_then(Value::as_str));
+            .clamp(1, constraints.max_total_duration_secs.max(1));
+        let requested_role = parse_role(args.get("role").and_then(Value::as_str));
         let first_frame = resolve_first_frame_from_args(Some(&ctx), &args).await?;
 
         let mut req = VideoGenerationRequest {
@@ -706,17 +810,534 @@ impl HostTool for VideoCreateTool {
         req.width = width;
         req.height = height;
 
-        let generated = self
+        let mut generated = self
             .backend
             .generate_video(&req)
             .await
             .map_err(|e| host_tool_err("VIDEO_GENERATION_FAILED", e))?;
 
+        let clips = generated.take_effective_clips();
+        let is_multi_clip = clips.len() > 1;
+        let base_stem = slugify(
+            filename
+                .trim_end_matches(".mp4")
+                .trim_end_matches(".webm")
+                .trim_end_matches(".mov"),
+            64,
+        );
+        let safe_stem = if base_stem.is_empty() {
+            "video".to_string()
+        } else {
+            base_stem
+        };
+
+        let mut artifact_ids = Vec::with_capacity(clips.len());
+        let mut clip_entries = Vec::with_capacity(clips.len());
+        let mut total_duration_secs: u32 = 0;
+        let mut first_artifact = None;
+        let mut first_mirrored_path = None;
+
+        for (idx, clip) in clips.into_iter().enumerate() {
+            let clip_filename = if is_multi_clip {
+                format!("{safe_stem}-part-{}.mp4", idx + 1)
+            } else if clip.filename.trim().is_empty() {
+                format!("{safe_stem}.mp4")
+            } else {
+                clip.filename
+            };
+            let clip_role = if is_multi_clip {
+                ArtifactRole::Intermediate
+            } else {
+                requested_role
+            };
+            let clip_duration =
+                inspect_mp4_duration_secs(&clip.bytes).unwrap_or_else(|| clip.duration_secs.max(1));
+            total_duration_secs = total_duration_secs.saturating_add(clip_duration);
+
+            let mut mirrored_path = None;
+            if let Some(ref dir) = self.output_dir {
+                if std::fs::create_dir_all(dir).is_ok() {
+                    let p = dir.join(&clip_filename);
+                    if std::fs::write(&p, &clip.bytes).is_ok() {
+                        mirrored_path = Some(p.display().to_string());
+                    }
+                }
+            }
+            if idx == 0 {
+                first_mirrored_path = mirrored_path.clone();
+            }
+
+            let artifact = ctx
+                .artifacts()
+                .put(ArtifactInput::from_bytes(
+                    &clip_filename,
+                    &clip.mime_type,
+                    clip_role,
+                    clip.bytes,
+                ))
+                .await?;
+
+            artifact_ids.push(artifact.id.clone());
+            clip_entries.push(json!({
+                "index": idx + 1,
+                "artifact_id": artifact.id,
+                "filename": artifact.name,
+                "mime_type": artifact.mime_type,
+                "size_bytes": artifact.size_bytes,
+                "sha256": artifact.sha256,
+                "width": clip.width,
+                "height": clip.height,
+                "duration_secs": clip_duration,
+                "role": if clip_role == ArtifactRole::Intermediate { "intermediate" } else { "primary" },
+                "path": mirrored_path,
+            }));
+            if idx == 0 {
+                first_artifact = Some(artifact);
+            }
+        }
+
+        let primary = first_artifact
+            .ok_or_else(|| host_tool_err("VIDEO_GENERATION_FAILED", "No video clips returned"))?;
+        let msg_suffix = generated
+            .provider_message
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|m| format!("\nProvider message:\n{m}"))
+            .unwrap_or_default();
+        let summary = if is_multi_clip {
+            format!(
+                "Created {} intermediate video clip artifacts ({}s total, requested {}s): {:?}. Call `video_concat` with `video_artifact_ids` in order to merge them into a single primary MP4 video artifact.{msg_suffix}",
+                clip_entries.len(),
+                total_duration_secs,
+                duration_secs,
+                artifact_ids
+            )
+        } else {
+            format!(
+                "Created video artifact '{}' (id={}, mime={}, duration_secs={}, bytes={}){msg_suffix}",
+                primary.name,
+                primary.id,
+                primary.mime_type,
+                total_duration_secs,
+                primary.size_bytes
+            )
+        };
+
+        Ok(host_tool_outcome(
+            &ctx,
+            summary,
+            json!({
+                "artifact_id": primary.id,
+                "artifact_ids": artifact_ids,
+                "artifact_kind": "video",
+                "filename": primary.name,
+                "mime_type": primary.mime_type,
+                "size_bytes": primary.size_bytes,
+                "sha256": primary.sha256,
+                "width": generated.width,
+                "height": generated.height,
+                "duration_secs": total_duration_secs,
+                "total_duration_secs": total_duration_secs,
+                "requested_duration_secs": duration_secs,
+                "clip_count": clip_entries.len(),
+                "clips": clip_entries,
+                "requires_concat": is_multi_clip,
+                "provider_message": generated.provider_message,
+                "provider": generated.provider,
+                "path": first_mirrored_path
+            }),
+        ))
+    }
+}
+
+/// Tên công cụ ghép nối các `Task Artifact` video MP4 thành một file MP4 liên tục.
+pub const VIDEO_CONCAT_TOOL: &str = "video_concat";
+
+/// Một clip video đầu vào đã được xác thực toàn vẹn SHA-256 từ `ArtifactStore` để chuyển xuống [`VideoConcatBackend`].
+#[derive(Debug, Clone)]
+pub struct VideoConcatInputClip {
+    pub artifact_id: String,
+    pub filename: String,
+    pub bytes: Vec<u8>,
+    pub duration_secs: u32,
+}
+
+/// Yêu cầu ghép nối nhiều clip video gửi tới [`VideoConcatBackend`].
+#[derive(Debug, Clone)]
+pub struct VideoConcatRequest {
+    pub filename: String,
+    pub title: Option<String>,
+    pub clips: Vec<VideoConcatInputClip>,
+}
+
+/// Kết quả video MP4 sau khi ghép nối từ [`VideoConcatBackend`].
+#[derive(Debug, Clone)]
+pub struct ConcatenatedVideoPayload {
+    pub filename: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub duration_secs: u32,
+}
+
+/// Seam mở rộng cho phép ghép nối nhiều clip video MP4 thành một file MP4 hoàn chỉnh.
+#[async_trait::async_trait]
+pub trait VideoConcatBackend: Send + Sync {
+    async fn concat_videos(
+        &self,
+        req: &VideoConcatRequest,
+    ) -> Result<ConcatenatedVideoPayload, String>;
+}
+
+/// Thực thi mặc định cho [`VideoConcatBackend`]:
+/// - Hỗ trợ ghép in-process cho container ISO BMFF `MP4_STREAM|` của [`DefaultVideoGeneratorBackend`].
+/// - Sử dụng `ffmpeg -f concat -safe 0 -c copy -movflags +faststart` (kèm fallback chuẩn hóa codec) cho stream video H.264/AAC thực tế.
+#[derive(Debug, Clone, Default)]
+pub struct DefaultVideoConcatBackend;
+
+struct TempConcatDir(PathBuf);
+
+impl TempConcatDir {
+    fn create() -> Result<Self, String> {
+        let dir = std::env::temp_dir().join(format!("orch_video_concat_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create temp concat dir: {e}"))?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for TempConcatDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[async_trait::async_trait]
+impl VideoConcatBackend for DefaultVideoConcatBackend {
+    async fn concat_videos(
+        &self,
+        req: &VideoConcatRequest,
+    ) -> Result<ConcatenatedVideoPayload, String> {
+        if req.clips.len() < 2 {
+            return Err("At least 2 video clips are required for concatenation".to_string());
+        }
+        let stem = slugify(
+            req.filename
+                .trim_end_matches(".mp4")
+                .trim_end_matches(".webm")
+                .trim_end_matches(".mov"),
+            64,
+        );
+        let safe_name = format!(
+            "{}.mp4",
+            if stem.is_empty() {
+                "video-merged"
+            } else {
+                &stem
+            }
+        );
+        let sum_duration: u32 = req
+            .clips
+            .iter()
+            .map(|c| c.duration_secs.max(1))
+            .sum::<u32>()
+            .max(1);
+
+        // 1. Nhánh in-process cho container của `DefaultVideoGeneratorBackend` (`mdat` bắt đầu bằng `MP4_STREAM|`)
+        let synthetic_payloads: Option<Vec<&str>> = req
+            .clips
+            .iter()
+            .map(|c| {
+                find_iso_bmff_box(&c.bytes, b"mdat")
+                    .and_then(|mdat| std::str::from_utf8(mdat).ok())
+                    .filter(|s| s.starts_with("MP4_STREAM|"))
+            })
+            .collect();
+
+        if let Some(streams) = synthetic_payloads {
+            let mut width = DEFAULT_VIDEO_WIDTH;
+            let mut height = DEFAULT_VIDEO_HEIGHT;
+            let mut scenes = Vec::with_capacity(streams.len());
+            for (idx, stream) in streams.into_iter().enumerate() {
+                for part in stream.split('|') {
+                    if idx == 0 {
+                        if let Some(w) = part.strip_prefix("w=").and_then(|v| v.parse::<u32>().ok())
+                        {
+                            width = w;
+                        } else if let Some(h) =
+                            part.strip_prefix("h=").and_then(|v| v.parse::<u32>().ok())
+                        {
+                            height = h;
+                        }
+                    }
+                    if let Some(p) = part.strip_prefix("prompt=") {
+                        scenes.push(p.to_string());
+                    }
+                }
+            }
+            let merged_prompt = if scenes.is_empty() {
+                format!("concat({} clips)", req.clips.len())
+            } else {
+                scenes.join(" + ")
+            };
+            let bytes = encode_minimal_mp4(&merged_prompt, width, height, sum_duration);
+            return Ok(ConcatenatedVideoPayload {
+                filename: safe_name,
+                mime_type: "video/mp4".to_string(),
+                bytes,
+                duration_secs: sum_duration,
+            });
+        }
+
+        // 2. Nhánh video MP4 thực tế qua `ffmpeg`
+        let temp_dir = TempConcatDir::create()?;
+        let mut list_content = String::new();
+        let mut clip_paths = Vec::with_capacity(req.clips.len());
+        for (idx, clip) in req.clips.iter().enumerate() {
+            let file_name = format!("clip_{idx:03}.mp4");
+            let clip_path = temp_dir.0.join(&file_name);
+            std::fs::write(&clip_path, &clip.bytes)
+                .map_err(|e| format!("failed to write temp clip {file_name}: {e}"))?;
+            list_content.push_str(&format!("file '{file_name}'\n"));
+            clip_paths.push(clip_path);
+        }
+        let list_path = temp_dir.0.join("concat.txt");
+        std::fs::write(&list_path, &list_content)
+            .map_err(|e| format!("failed to write concat.txt: {e}"))?;
+        let merged_path = temp_dir.0.join("merged.mp4");
+
+        let copy_status = tokio::process::Command::new("ffmpeg")
+            .current_dir(&temp_dir.0)
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                "concat.txt",
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "merged.mp4",
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("failed to invoke ffmpeg for video_concat: {e}"))?;
+
+        if !copy_status.status.success() || !merged_path.exists() {
+            // Fallback: re-encode sang chuẩn H.264 + AAC đồng nhất nếu stream copy không tương thích
+            let reencode = tokio::process::Command::new("ffmpeg")
+                .current_dir(&temp_dir.0)
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    "concat.txt",
+                    "-vf",
+                    "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                    "-r",
+                    "30",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-movflags",
+                    "+faststart",
+                    "merged.mp4",
+                ])
+                .output()
+                .await
+                .map_err(|e| format!("failed to invoke ffmpeg fallback for video_concat: {e}"))?;
+
+            if !reencode.status.success() || !merged_path.exists() {
+                let stderr = String::from_utf8_lossy(&reencode.stderr);
+                return Err(format!("ffmpeg video_concat failed: {}", stderr.trim()));
+            }
+        }
+
+        let merged_bytes = std::fs::read(&merged_path)
+            .map_err(|e| format!("failed to read merged MP4 output: {e}"))?;
+        let actual_duration = inspect_mp4_duration_secs(&merged_bytes).unwrap_or(sum_duration);
+
+        Ok(ConcatenatedVideoPayload {
+            filename: safe_name,
+            mime_type: "video/mp4".to_string(),
+            bytes: merged_bytes,
+            duration_secs: actual_duration,
+        })
+    }
+}
+
+/// Công cụ `video_concat`: ghép nhiều `Task Artifact` video MP4 thành một file MP4 hoàn chỉnh (`role: "primary"`).
+pub struct VideoConcatTool {
+    pub backend: Arc<dyn VideoConcatBackend>,
+    pub output_dir: Option<PathBuf>,
+}
+
+impl VideoConcatTool {
+    pub fn new(backend: Arc<dyn VideoConcatBackend>) -> Self {
+        Self {
+            backend,
+            output_dir: None,
+        }
+    }
+
+    pub fn with_default_backend() -> Self {
+        Self::new(Arc::new(DefaultVideoConcatBackend))
+    }
+
+    pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.output_dir = Some(dir.into());
+        self
+    }
+
+    pub fn into_host_tool(self) -> Arc<dyn HostTool> {
+        Arc::new(self)
+    }
+}
+
+impl Default for VideoConcatTool {
+    fn default() -> Self {
+        Self::with_default_backend()
+    }
+}
+
+#[async_trait::async_trait]
+impl HostTool for VideoConcatTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: VIDEO_CONCAT_TOOL.to_string(),
+            description: "Concatenate 2 or more MP4 video artifacts (`video_artifact_ids`) in order into a single continuous MP4 video artifact in the Task's ArtifactStore.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["filename", "video_artifact_ids"],
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Output merged MP4 video filename (e.g. 'full-overview.mp4')."
+                    },
+                    "video_artifact_ids": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 24,
+                        "items": { "type": "string" },
+                        "description": "Ordered list of at least 2 MP4 video Artifact IDs in the current task to concatenate."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional video title or caption for the merged video."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["primary", "intermediate"],
+                        "description": "Artifact visibility role for the merged video (default: 'primary')."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            effect: ToolEffect::Mutating,
+        }
+    }
+
+    async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutcome, ToolError> {
+        let filename = args
+            .get("filename")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing filename"))?;
+        let raw_ids = args
+            .get("video_artifact_ids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing video_artifact_ids array"))?;
+        if raw_ids.len() < 2 {
+            return Err(host_tool_err(
+                "INVALID_ARGUMENT",
+                "video_artifact_ids must contain at least 2 Artifact IDs",
+            ));
+        }
+        if raw_ids.len() > 24 {
+            return Err(host_tool_err(
+                "INVALID_ARGUMENT",
+                "video_artifact_ids cannot exceed 24 Artifact IDs",
+            ));
+        }
+        let title = args
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let role = parse_role(args.get("role").and_then(Value::as_str));
+
+        let mut clips = Vec::with_capacity(raw_ids.len());
+        let mut source_ids = Vec::with_capacity(raw_ids.len());
+        for item in raw_ids {
+            let id = item
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    host_tool_err(
+                        "INVALID_ARGUMENT",
+                        "video_artifact_ids entries must be non-empty strings",
+                    )
+                })?;
+            let reader = ctx.artifacts().open(id).await?;
+            let meta = reader.metadata();
+            if !meta.mime_type.eq_ignore_ascii_case("video/mp4")
+                && !meta.mime_type.to_ascii_lowercase().starts_with("video/")
+            {
+                return Err(host_tool_err(
+                    "UNSUPPORTED_VIDEO_ARTIFACT",
+                    format!(
+                        "Artifact '{}' has mime_type '{}', expected 'video/mp4'",
+                        id, meta.mime_type
+                    ),
+                ));
+            }
+            let clip_name = meta.name.clone();
+            let bytes = reader
+                .read_all()
+                .await
+                .map_err(|e| host_tool_err("ARTIFACT_INTEGRITY", e.to_string()))?;
+            let duration_secs = inspect_mp4_duration_secs(&bytes).unwrap_or(5);
+            source_ids.push(id.to_string());
+            clips.push(VideoConcatInputClip {
+                artifact_id: id.to_string(),
+                filename: clip_name,
+                bytes,
+                duration_secs,
+            });
+        }
+
+        let req = VideoConcatRequest {
+            filename: filename.to_string(),
+            title,
+            clips,
+        };
+        let merged = self
+            .backend
+            .concat_videos(&req)
+            .await
+            .map_err(|e| host_tool_err("VIDEO_CONCAT_FAILED", e))?;
+
         let mut mirrored_path = None;
         if let Some(ref dir) = self.output_dir {
             if std::fs::create_dir_all(dir).is_ok() {
-                let p = dir.join(&generated.filename);
-                if std::fs::write(&p, &generated.bytes).is_ok() {
+                let p = dir.join(&merged.filename);
+                if std::fs::write(&p, &merged.bytes).is_ok() {
                     mirrored_path = Some(p.display().to_string());
                 }
             }
@@ -725,21 +1346,21 @@ impl HostTool for VideoCreateTool {
         let artifact = ctx
             .artifacts()
             .put(ArtifactInput::from_bytes(
-                &generated.filename,
-                &generated.mime_type,
+                &merged.filename,
+                &merged.mime_type,
                 role,
-                generated.bytes,
+                merged.bytes,
             ))
             .await?;
 
         Ok(host_tool_outcome(
             &ctx,
             format!(
-                "Created video artifact '{}' (id={}, mime={}, duration_secs={}, bytes={})",
+                "Concatenated {} video clips into '{}' (id={}, duration_secs={}, bytes={})",
+                source_ids.len(),
                 artifact.name,
                 artifact.id,
-                artifact.mime_type,
-                generated.duration_secs,
+                merged.duration_secs,
                 artifact.size_bytes
             ),
             json!({
@@ -750,10 +1371,9 @@ impl HostTool for VideoCreateTool {
                 "mime_type": artifact.mime_type,
                 "size_bytes": artifact.size_bytes,
                 "sha256": artifact.sha256,
-                "width": generated.width,
-                "height": generated.height,
-                "duration_secs": generated.duration_secs,
-                "provider": generated.provider,
+                "duration_secs": merged.duration_secs,
+                "clip_count": source_ids.len(),
+                "source_artifact_ids": source_ids,
                 "path": mirrored_path
             }),
         ))
@@ -1079,7 +1699,7 @@ pub fn media_host_tools(
     )
 }
 
-/// Xuất bộ 4 `HostTool` đa phương tiện & artifact (`image_create`, `video_create`, `tts_synthesize`, `artifact_create`)
+/// Xuất bộ 5 `HostTool` đa phương tiện & artifact (`image_create`, `video_create`, `video_concat`, `tts_synthesize`, `artifact_create`)
 /// với đầy đủ các backend tùy chỉnh cho Image, Video và TTS.
 pub fn media_host_tools_with_video(
     image_backend: Arc<dyn ImageGeneratorBackend>,
@@ -1089,15 +1709,23 @@ pub fn media_host_tools_with_video(
 ) -> Vec<Arc<dyn HostTool>> {
     let mut img = ImageCreateTool::new(image_backend);
     let mut vid = VideoCreateTool::new(video_backend);
+    let mut vid_concat = VideoConcatTool::with_default_backend();
     let mut tts = TtsSynthesizeTool::new(tts_backend);
     let mut gen = ArtifactCreateTool::new();
     if let Some(dir) = output_dir {
         img = img.with_output_dir(dir.join("images"));
         vid = vid.with_output_dir(dir.join("videos"));
+        vid_concat = vid_concat.with_output_dir(dir.join("videos"));
         tts = tts.with_output_dir(dir.join("tts"));
         gen = gen.with_output_dir(dir.join("files"));
     }
-    vec![Arc::new(img), Arc::new(vid), Arc::new(tts), Arc::new(gen)]
+    vec![
+        Arc::new(img),
+        Arc::new(vid),
+        Arc::new(vid_concat),
+        Arc::new(tts),
+        Arc::new(gen),
+    ]
 }
 
 fn parse_role(raw: Option<&str>) -> ArtifactRole {
@@ -1109,7 +1737,7 @@ fn parse_role(raw: Option<&str>) -> ArtifactRole {
 
 fn decode_hex(hex_str: &str) -> Result<Vec<u8>, String> {
     let clean: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         return Err("hex_bytes length must be even".to_string());
     }
     let mut out = Vec::with_capacity(clean.len() / 2);
@@ -1522,7 +2150,12 @@ fn render_svg_card(
             let tspans: String = lines
                 .iter()
                 .enumerate()
-                .map(|(i, line)| format!("    <tspan x=\"52\" y=\"{}\">{line}</tspan>\n", 132 + (i as u32) * 24))
+                .map(|(i, line)| {
+                    format!(
+                        "    <tspan x=\"52\" y=\"{}\">{line}</tspan>\n",
+                        132 + (i as u32) * 24
+                    )
+                })
                 .collect();
             format!(
                 r##"  <rect x="32" y="88" width="{box_w}" height="{box_h}" rx="12" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
@@ -1693,9 +2326,79 @@ fn synthesize_pcm_wav(text: &str, sample_rate: u32, duration_ms: u64) -> Vec<u8>
     wav
 }
 
-/// Tạo container ISO BMFF / MP4 (`ftyp` + `mdat`) hợp lệ chứa metadata đặc tả cảnh video.
+fn find_iso_bmff_box<'a>(mut data: &'a [u8], target: &[u8; 4]) -> Option<&'a [u8]> {
+    while data.len() >= 8 {
+        let size32 = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let kind = &data[4..8];
+        let (box_len, header_len) = if size32 == 1 {
+            if data.len() < 16 {
+                return None;
+            }
+            let size64 = u64::from_be_bytes(data[8..16].try_into().ok()?) as usize;
+            (size64, 16usize)
+        } else if size32 == 0 {
+            (data.len(), 8usize)
+        } else {
+            (size32, 8usize)
+        };
+        if box_len < header_len || box_len > data.len() {
+            return None;
+        }
+        if kind == target {
+            return Some(&data[header_len..box_len]);
+        }
+        data = &data[box_len..];
+    }
+    None
+}
+
+/// Đọc thời lượng thực tế (giây) từ container ISO BMFF / MP4 (`moov -> mvhd`, version 0 hoặc version 1),
+/// kèm nhánh fallback đọc `mdat` (`dur=Ns`) cho các synthetic stream cũ.
+pub fn inspect_mp4_duration_secs(bytes: &[u8]) -> Option<u32> {
+    if let Some(moov) = find_iso_bmff_box(bytes, b"moov") {
+        if let Some(mvhd) = find_iso_bmff_box(moov, b"mvhd") {
+            if !mvhd.is_empty() {
+                let version = mvhd[0];
+                let (timescale, duration) = if version == 1 && mvhd.len() >= 28 {
+                    let ts = u32::from_be_bytes(mvhd[16..20].try_into().ok()?) as u64;
+                    let dur = u64::from_be_bytes(mvhd[20..28].try_into().ok()?);
+                    (ts, dur)
+                } else if version == 0 && mvhd.len() >= 20 {
+                    let ts = u32::from_be_bytes(mvhd[12..16].try_into().ok()?) as u64;
+                    let dur = u32::from_be_bytes(mvhd[16..20].try_into().ok()?) as u64;
+                    (ts, dur)
+                } else {
+                    (0, 0)
+                };
+                if let Some(secs) = duration
+                    .saturating_add(timescale / 2)
+                    .checked_div(timescale)
+                {
+                    return Some(secs.max(1) as u32);
+                }
+            }
+        }
+    }
+
+    if let Some(mdat) = find_iso_bmff_box(bytes, b"mdat") {
+        if let Ok(text) = std::str::from_utf8(mdat) {
+            if let Some(pos) = text.find("dur=") {
+                let rest = &text[pos + "dur=".len()..];
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(secs) = digits.parse::<u32>() {
+                    if secs > 0 {
+                        return Some(secs);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Tạo container ISO BMFF / MP4 (`ftyp` + `moov/mvhd` + `mdat`) hợp lệ chứa metadata đặc tả cảnh video.
 fn encode_minimal_mp4(prompt: &str, width: u32, height: u32, duration_secs: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(128 + prompt.len());
+    let mut out = Vec::with_capacity(256 + prompt.len());
     // Box 1: `ftyp` (24 bytes) - ISO Base Media File Format (`isom`, `mp42`)
     let ftyp_len: u32 = 24;
     out.extend_from_slice(&ftyp_len.to_be_bytes());
@@ -1704,10 +2407,26 @@ fn encode_minimal_mp4(prompt: &str, width: u32, height: u32, duration_secs: u32)
     out.extend_from_slice(&512u32.to_be_bytes());
     out.extend_from_slice(b"isommp42");
 
-    // Box 2: `mdat` chứa thông tin khung hình và prompt
-    let payload = format!(
-        "MP4_STREAM|w={width}|h={height}|dur={duration_secs}s|prompt={prompt}"
-    );
+    // Box 2: `moov` (116 bytes) chứa `mvhd` (108 bytes, version 0, timescale = 1000)
+    let mut mvhd_payload = [0u8; 100];
+    let timescale: u32 = 1000;
+    let duration_ms: u32 = duration_secs.max(1).saturating_mul(timescale);
+    mvhd_payload[12..16].copy_from_slice(&timescale.to_be_bytes());
+    mvhd_payload[16..20].copy_from_slice(&duration_ms.to_be_bytes());
+    mvhd_payload[20..24].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // rate = 1.0
+    mvhd_payload[24..26].copy_from_slice(&0x0100u16.to_be_bytes()); // volume = 1.0
+    mvhd_payload[96..100].copy_from_slice(&1u32.to_be_bytes()); // next_track_id = 1
+
+    let mvhd_len: u32 = 8 + (mvhd_payload.len() as u32);
+    let moov_len: u32 = 8 + mvhd_len;
+    out.extend_from_slice(&moov_len.to_be_bytes());
+    out.extend_from_slice(b"moov");
+    out.extend_from_slice(&mvhd_len.to_be_bytes());
+    out.extend_from_slice(b"mvhd");
+    out.extend_from_slice(&mvhd_payload);
+
+    // Box 3: `mdat` chứa thông tin khung hình và prompt
+    let payload = format!("MP4_STREAM|w={width}|h={height}|dur={duration_secs}s|prompt={prompt}");
     let mdat_len = (8 + payload.len()) as u32;
     out.extend_from_slice(&mdat_len.to_be_bytes());
     out.extend_from_slice(b"mdat");
