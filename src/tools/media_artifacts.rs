@@ -705,7 +705,7 @@ impl HostTool for VideoCreateTool {
         ToolDescriptor {
             name: "video_create".to_string(),
             description: format!(
-                "Generate a short illustration or explainer video (MP4) from a visual prompt and publish it as a Task Artifact. \
+                "Generate an illustration or explainer video (MP4) with built-in synchronized audio/voiceover narration and burned-in subtitles directly from `prompt` (do NOT call `tts_synthesize` for video requests). \
                  [Active provider: {label} | max_clip_duration_secs={max_clip}s | max_clips_per_call={max_clips} | max_total_duration_secs={max_total}s. {guidance}]",
                 label = c.provider_label,
                 guidance = c.provider_guidance,
@@ -1190,7 +1190,7 @@ impl HostTool for VideoConcatTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: VIDEO_CONCAT_TOOL.to_string(),
-            description: "Concatenate 2 or more MP4 video artifacts (`video_artifact_ids`) in order into a single continuous MP4 video artifact in the Task's ArtifactStore.".to_string(),
+            description: "Concatenate 2 or more sequential MP4 video clip artifacts (`video_artifact_ids`) in order into a single continuous primary MP4 video artifact. ONLY use `video_concat` when the requested video duration exceeds `video_create`'s single-clip duration limit (`duration_secs > max_clip_duration_secs`), producing multiple clips (`clip_count > 1` / `requires_concat: true`).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["filename", "video_artifact_ids"],
@@ -1379,7 +1379,7 @@ impl HostTool for TtsSynthesizeTool {
         ToolDescriptor {
             name: "tts_synthesize".to_string(),
             description:
-                "Synthesize spoken audio (TTS) from text and publish it as an audio Task Artifact."
+                "Synthesize standalone spoken audio (TTS WAV) from text when the user requests an audio-only artifact. Do NOT call `tts_synthesize` to create audio for a video (`video_create` already generates video with integrated voiceover audio and subtitles)."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
