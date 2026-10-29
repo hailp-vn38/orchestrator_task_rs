@@ -675,3 +675,24 @@ async fn video_create_registers_multiple_clips_as_intermediate_and_video_concat_
 
     orch.shutdown().await.unwrap();
 }
+
+#[test]
+fn media_tools_declare_explicit_timeouts_above_default_runtime_limit() {
+    assert_eq!(
+        ImageCreateTool::default().timeout(),
+        Some(IMAGE_CREATE_TIMEOUT)
+    );
+    assert_eq!(
+        VideoCreateTool::default().timeout(),
+        Some(VIDEO_CREATE_TIMEOUT)
+    );
+    assert_eq!(
+        VideoConcatTool::default().timeout(),
+        Some(VIDEO_CONCAT_TIMEOUT)
+    );
+    assert_eq!(
+        TtsSynthesizeTool::default().timeout(),
+        Some(TTS_SYNTHESIZE_TIMEOUT)
+    );
+    assert!(VIDEO_CREATE_TIMEOUT >= Duration::from_secs(900));
+}

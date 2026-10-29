@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use llm_wiki::slugify;
 use orchestrator_agent_rs::{
@@ -32,6 +33,14 @@ pub const DEFAULT_VIDEO_HEIGHT: u32 = 360;
 pub const MAX_IMAGE_REFERENCES: usize = 4;
 /// Giới hạn kích thước mỗi ảnh tham chiếu (10 MiB).
 pub const MAX_REFERENCE_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+/// Timeout cho `image_create` (10 phút — lớn hơn timeout nội bộ + failover của backend).
+pub const IMAGE_CREATE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Timeout cho `video_create` (30 phút — lớn hơn thời gian tạo/ghép đa phân cảnh + overrun + failover của Muse).
+pub const VIDEO_CREATE_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Timeout cho `video_concat` (10 phút — đủ cho chuẩn hóa/ghép tối đa 24 clip qua ffmpeg).
+pub const VIDEO_CONCAT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Timeout cho `tts_synthesize` (10 phút).
+pub const TTS_SYNTHESIZE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Ảnh tham chiếu đã được xác minh toàn vẹn để chuyển xuống Backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,6 +556,10 @@ impl HostTool for ImageCreateTool {
         }
     }
 
+    fn timeout(&self) -> Option<Duration> {
+        Some(IMAGE_CREATE_TIMEOUT)
+    }
+
     async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutcome, ToolError> {
         let filename = args
             .get("filename")
@@ -761,6 +774,10 @@ impl HostTool for VideoCreateTool {
             }),
             effect: ToolEffect::Mutating,
         }
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        Some(VIDEO_CREATE_TIMEOUT)
     }
 
     async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutcome, ToolError> {
@@ -1003,7 +1020,10 @@ impl VideoConcatBackend for DefaultVideoConcatBackend {
         if req.clips.len() < 2 {
             return Err("At least 2 video clips are required for concatenation".to_string());
         }
-        let safe_name = format!("{}.mp4", normalize_video_stem(&req.filename, "video-merged"));
+        let safe_name = format!(
+            "{}.mp4",
+            normalize_video_stem(&req.filename, "video-merged")
+        );
         let sum_duration: u32 = req
             .clips
             .iter()
@@ -1222,6 +1242,10 @@ impl HostTool for VideoConcatTool {
         }
     }
 
+    fn timeout(&self) -> Option<Duration> {
+        Some(VIDEO_CONCAT_TIMEOUT)
+    }
+
     async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutcome, ToolError> {
         let filename = args
             .get("filename")
@@ -1415,6 +1439,10 @@ impl HostTool for TtsSynthesizeTool {
             }),
             effect: ToolEffect::Mutating,
         }
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        Some(TTS_SYNTHESIZE_TIMEOUT)
     }
 
     async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutcome, ToolError> {
