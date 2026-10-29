@@ -1898,8 +1898,16 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
             "expected deterministic WAV transcript in tool result, got: {all_tool_texts}"
         );
         assert!(
+            all_tool_texts.contains("00:00:00,000 --> 00:00:01,000"),
+            "expected SRT timestamp block for 1000ms WAV in tool result, got: {all_tool_texts}"
+        );
+        assert!(
             all_tool_texts.contains("[wav_transcript: 16000Hz, 1ch, 16bit, 2000ms, lang=vi-VN]"),
             "expected deterministic MP4 extracted audio transcript in tool result, got: {all_tool_texts}"
+        );
+        assert!(
+            all_tool_texts.contains("00:00:00,000 --> 00:00:02,000"),
+            "expected SRT timestamp block for 2000ms MP4 in tool result, got: {all_tool_texts}"
         );
         // Find the second artifact_id (`not-audio.txt`) from `Published ... (id=art-..., ...)`
         let txt_art_id = req

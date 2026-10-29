@@ -25,10 +25,10 @@ pub mod wiki_bridge;
 pub mod youtube;
 
 pub use asr_transcribe::{
-    extract_wav_from_mp4_bytes, inspect_mp4_bytes, inspect_wav_bytes, AsrTranscribeTool,
-    AsrTranscriberBackend, AsrTranscriptionRequest, DefaultAsrTranscriberBackend,
-    TranscribedAudioPayload, WavHeaderInfo, WavSampleFormat, ASR_TRANSCRIBE_TOOL,
-    CODE_ASR_UNSUPPORTED_AUDIO,
+    extract_wav_from_mp4_bytes, format_segments_as_srt, format_srt_timestamp, inspect_mp4_bytes,
+    inspect_wav_bytes, AsrTranscribeTool, AsrTranscriberBackend, AsrTranscriptionRequest,
+    DefaultAsrTranscriberBackend, TranscribedAudioPayload, TranscribedAudioSegment, WavHeaderInfo,
+    WavSampleFormat, ASR_TRANSCRIBE_TOOL, CODE_ASR_UNSUPPORTED_AUDIO,
 };
 pub use markdown_report::{report_host_tools, MarkdownCreateTool, MarkdownReadTool};
 pub use media_artifacts::{

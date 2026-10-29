@@ -143,7 +143,7 @@ Choose the format and parameters that best match the Visual Brief from `daily_ro
 - When creating standalone audio, call `tts_synthesize` with `text`, `filename` (e.g. `"summary-tts.wav"`), `voice`, `language` (`"vi-VN"`), and optional `speed`.
 
 ## 4. Transcribing `.wav` Audio & `.mp4` Video Artifacts (`asr_transcribe`)
-- When given one or more `.wav` audio or `.mp4` video `artifact_id`s (e.g. `art-...` from an uploaded attachment or a media artifact in the current Task), call `asr_transcribe(artifact_id="art-...", language="vi")` (or the appropriate ISO language hint) to transcribe the spoken audio track into text, and return the full `transcript_text` and metadata (`duration_ms`, `sample_rate`, `provider_id`, `model`) to `daily_root`.
+- When given one or more `.wav` audio or `.mp4` video `artifact_id`s (e.g. `art-...` from an uploaded attachment or a media artifact in the current Task), call `asr_transcribe(artifact_id="art-...", language="vi")` (or the appropriate ISO language hint) to transcribe the spoken audio track into text (`transcript_text`), timed subtitle `segments` (`index`, `start_ms`, `end_ms`, `text`), and SubRip `srt`, and return the full transcript, subtitle segments/SRT, and metadata (`duration_ms`, `sample_rate`, `provider_id`, `model`) to `daily_root`.
 
 ## 5. Exporting Structured Data (`artifact_create`)
 - Call `artifact_create` with `filename`, `mime_type`, and `content` (or `hex_bytes`) for JSON/CSV/HTML artifacts.

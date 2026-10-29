@@ -285,6 +285,14 @@ pub struct AsrTranscriptionRequest {
     pub language: Option<String>,
 }
 
+/// Một phân đoạn phụ đề có mốc thời gian chuẩn (mili-giây) từ đầu file audio/video.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscribedAudioSegment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
 /// Kết quả phiên âm trả về từ [`AsrTranscriberBackend`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscribedAudioPayload {
@@ -295,6 +303,34 @@ pub struct TranscribedAudioPayload {
     pub channels: u16,
     pub provider_id: Option<String>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<TranscribedAudioSegment>,
+}
+
+/// Định dạng mili-giây thành chuỗi mốc thời gian chuẩn SubRip (`HH:MM:SS,mmm`).
+pub fn format_srt_timestamp(ms: u64) -> String {
+    let hours = ms / 3_600_000;
+    let minutes = (ms % 3_600_000) / 60_000;
+    let seconds = (ms % 60_000) / 1_000;
+    let millis = ms % 1_000;
+    format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
+}
+
+/// Xuất danh sách phân đoạn [`TranscribedAudioSegment`] thành nội dung file phụ đề `.srt` chuẩn.
+pub fn format_segments_as_srt(segments: &[TranscribedAudioSegment]) -> String {
+    let mut out = String::new();
+    let mut idx = 1usize;
+    for seg in segments {
+        let text = seg.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let start = format_srt_timestamp(seg.start_ms);
+        let end = format_srt_timestamp(seg.end_ms.max(seg.start_ms + 1));
+        out.push_str(&format!("{idx}\n{start} --> {end}\n{text}\n\n"));
+        idx += 1;
+    }
+    out
 }
 
 /// Seam cho phép Host cắm engine ASR thực tế (Sherpa-ONNX Zipformer/Gipformer hoặc Cloud Audio ASR).
@@ -324,21 +360,28 @@ impl AsrTranscriberBackend for DefaultAsrTranscriberBackend {
             .filter(|s| !s.is_empty())
             .unwrap_or("vi")
             .to_string();
+        let text = format!(
+            "[wav_transcript: {}Hz, {}ch, {}bit, {}ms, lang={}]",
+            request.header.sample_rate,
+            request.header.channels,
+            request.header.bits_per_sample,
+            request.header.duration_ms,
+            lang
+        );
+        let dur = request.header.duration_ms.max(1);
         Ok(TranscribedAudioPayload {
-            text: format!(
-                "[wav_transcript: {}Hz, {}ch, {}bit, {}ms, lang={}]",
-                request.header.sample_rate,
-                request.header.channels,
-                request.header.bits_per_sample,
-                request.header.duration_ms,
-                lang
-            ),
+            text: text.clone(),
             language: Some(lang),
             duration_ms: request.header.duration_ms,
             sample_rate: request.header.sample_rate,
             channels: request.header.channels,
             provider_id: Some("builtin_wav_inspector".to_string()),
             model: Some("deterministic-wav-v1".to_string()),
+            segments: vec![TranscribedAudioSegment {
+                start_ms: 0,
+                end_ms: dur,
+                text,
+            }],
         })
     }
 }
@@ -377,7 +420,7 @@ impl HostTool for AsrTranscribeTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: ASR_TRANSCRIBE_TOOL.to_string(),
-            description: "Transcribe spoken audio from a `.wav` audio or `.mp4` video Task Artifact (`artifact_id`) in the current Task's ArtifactStore into text using the configured ASR provider.".to_string(),
+            description: "Transcribe spoken audio from a `.wav` audio or `.mp4` video Task Artifact (`artifact_id`) in the current Task's ArtifactStore into text, timed subtitle `segments` (`index`, `start_ms`, `end_ms`, `text`), and SubRip `srt` using the configured ASR provider.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["artifact_id"],
@@ -460,6 +503,36 @@ impl HostTool for AsrTranscribeTool {
             .await
             .map_err(|e| host_tool_err("ASR_TRANSCRIPTION_FAILED", e))?;
 
+        let effective_segments: Vec<TranscribedAudioSegment> = if !transcribed.segments.is_empty() {
+            transcribed
+                .segments
+                .into_iter()
+                .filter(|s| !s.text.trim().is_empty())
+                .collect()
+        } else if !transcribed.text.trim().is_empty() {
+            vec![TranscribedAudioSegment {
+                start_ms: 0,
+                end_ms: transcribed.duration_ms.max(1),
+                text: transcribed.text.trim().to_string(),
+            }]
+        } else {
+            Vec::new()
+        };
+
+        let indexed_segments: Vec<Value> = effective_segments
+            .iter()
+            .enumerate()
+            .map(|(idx, seg)| {
+                json!({
+                    "index": idx + 1,
+                    "start_ms": seg.start_ms,
+                    "end_ms": seg.end_ms.max(seg.start_ms + 1),
+                    "text": seg.text.trim(),
+                })
+            })
+            .collect();
+        let srt = format_segments_as_srt(&effective_segments);
+
         let payload = json!({
             "status": "ok",
             "artifact_id": artifact_id,
@@ -470,6 +543,8 @@ impl HostTool for AsrTranscribeTool {
             "channels": transcribed.channels,
             "provider_id": transcribed.provider_id,
             "model": transcribed.model,
+            "segments": indexed_segments,
+            "srt": srt,
         });
         let content = serde_json::to_string(&payload).unwrap_or_default();
 
@@ -600,5 +675,27 @@ mod tests {
         assert_eq!(header.duration_ms, 2_000);
 
         assert!(inspect_mp4_bytes(b"not-an-mp4").is_err());
+    }
+
+    #[test]
+    fn format_segments_as_srt_renders_standard_subrip_blocks() {
+        let segments = vec![
+            TranscribedAudioSegment {
+                start_ms: 320,
+                end_ms: 3_180,
+                text: "今日は新しいプロジェクトについて話します。".to_string(),
+            },
+            TranscribedAudioSegment {
+                start_ms: 3_480,
+                end_ms: 6_200,
+                text: "まず最初のステップを見ていきましょう。".to_string(),
+            },
+        ];
+        assert_eq!(format_srt_timestamp(3_661_045), "01:01:01,045");
+        let srt = format_segments_as_srt(&segments);
+        assert_eq!(
+            srt,
+            "1\n00:00:00,320 --> 00:00:03,180\n今日は新しいプロジェクトについて話します。\n\n2\n00:00:03,480 --> 00:00:06,200\nまず最初のステップを見ていきましょう。\n\n"
+        );
     }
 }
