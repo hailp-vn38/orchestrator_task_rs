@@ -1741,7 +1741,7 @@ async fn watcher_emits_task_progress_for_message_committed_and_tool_completed() 
 async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
     use orchestrator_agent_rs::test_support::{ModelRequest, ModelResponse, ModelToolCall};
     use orchestrator_agent_rs::ArtifactInput;
-    use orchestrator_flow_rs::ErrorCode;
+    use orchestrator_flow_rs::{ErrorCode, VideoGeneratorBackend as _};
 
     fn build_test_pcm16_wav(sample_rate: u32, num_samples: u32) -> Vec<u8> {
         let data_len = num_samples * 2;
@@ -1780,9 +1780,22 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
     let task_init = TaskManager::prepare(task_cfg).await.unwrap();
 
     let wav_bytes = build_test_pcm16_wav(16_000, 16_000);
+    let mp4_payload = orchestrator_flow_rs::DefaultVideoGeneratorBackend
+        .generate_video(&orchestrator_flow_rs::VideoGenerationRequest {
+            filename: "ban-ghi-hinh.mp4".to_string(),
+            prompt: "Demo video with spoken narration".to_string(),
+            title: Some("Demo Video".to_string()),
+            width: 640,
+            height: 360,
+            duration_secs: 2,
+            first_frame: None,
+        })
+        .await
+        .unwrap();
+    let mp4_bytes = mp4_payload.bytes;
 
     let gw = ScriptedGateway::new();
-    // 1. Root agent inspects user prompt containing `[Attached Input Artifacts]` and forwards `art-...` to `media_creator`
+    // 1. Root agent inspects user prompt containing `Attached input artifacts:` and forwards both `art-...` IDs to `media_creator`
     gw.push_with(|req: &ModelRequest| {
         let user_text = req
             .messages
@@ -1790,28 +1803,36 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
             .map(|m| m.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let art_id = user_text
+        let art_ids: Vec<String> = user_text
             .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-            .find(|tok| tok.starts_with("art-") && tok.len() > 8)
-            .expect("root prompt should contain staged input artifact_id")
-            .to_string();
+            .filter(|tok| tok.starts_with("art-") && tok.len() > 8)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            art_ids.len(),
+            2,
+            "root prompt should contain both WAV and MP4 staged input artifact_ids: {user_text}"
+        );
         ModelResponse {
-            text: "Ủy quyền cho media_creator bóc băng file WAV.".to_string(),
+            text: "Ủy quyền cho media_creator bóc băng file WAV và MP4.".to_string(),
             finish_reason: "tool_use".to_string(),
             tool_calls: vec![ModelToolCall {
                 id: "call_sub_asr".to_string(),
                 name: "subagent".to_string(),
                 arguments: json!({
                     "agent": "media_creator",
-                    "description": "Transcribe user WAV and test invalid audio guard",
-                    "prompt": format!("Please transcribe artifact {art_id} and write a markdown summary.")
+                    "description": "Transcribe user WAV and MP4 and test invalid audio guard",
+                    "prompt": format!(
+                        "Please transcribe artifacts {} and {} and write a markdown summary.",
+                        art_ids[0], art_ids[1]
+                    )
                 }),
             }],
             usage: None,
         }
     });
-    // 2. Subagent `media_creator` extracts `art_id` from prompt, calls `asr_transcribe` on the valid WAV
-    //    and creates a non-WAV text artifact to verify `ASR_UNSUPPORTED_AUDIO`.
+    // 2. Subagent `media_creator` extracts both `art_id`s from prompt, calls `asr_transcribe` on the WAV and MP4,
+    //    and creates a non-media text artifact to verify `ASR_UNSUPPORTED_AUDIO`.
     gw.push_with(|req: &ModelRequest| {
         let sub_text = req
             .messages
@@ -1819,20 +1840,33 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
             .map(|m| m.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let art_id = sub_text
+        let art_ids: Vec<String> = sub_text
             .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-            .find(|tok| tok.starts_with("art-") && tok.len() > 8)
-            .expect("subagent prompt should contain forwarded artifact_id")
-            .to_string();
+            .filter(|tok| tok.starts_with("art-") && tok.len() > 8)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            art_ids.len(),
+            2,
+            "subagent prompt should contain both forwarded artifact_ids"
+        );
         ModelResponse {
-            text: "Đang gọi asr_transcribe cho file WAV.".to_string(),
+            text: "Đang gọi asr_transcribe cho file WAV và MP4.".to_string(),
             finish_reason: "tool_use".to_string(),
             tool_calls: vec![
                 ModelToolCall {
-                    id: "call_asr_ok".to_string(),
+                    id: "call_asr_wav_ok".to_string(),
                     name: "asr_transcribe".to_string(),
                     arguments: json!({
-                        "artifact_id": art_id,
+                        "artifact_id": art_ids[0],
+                        "language": "vi-VN"
+                    }),
+                },
+                ModelToolCall {
+                    id: "call_asr_mp4_ok".to_string(),
+                    name: "asr_transcribe".to_string(),
+                    arguments: json!({
+                        "artifact_id": art_ids[1],
                         "language": "vi-VN"
                     }),
                 },
@@ -1850,8 +1884,8 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
             usage: None,
         }
     });
-    // 3. Subagent `media_creator` tries `asr_transcribe` on the non-WAV artifact (expects `ASR_UNSUPPORTED_AUDIO`)
-    //    and writes a markdown report with the transcript.
+    // 3. Subagent `media_creator` tries `asr_transcribe` on the non-media artifact (expects `ASR_UNSUPPORTED_AUDIO`)
+    //    and writes a markdown report with the transcripts.
     gw.push_with(|req: &ModelRequest| {
         let all_tool_texts = req
             .messages
@@ -1861,7 +1895,11 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
             .join("\n");
         assert!(
             all_tool_texts.contains("[wav_transcript: 16000Hz, 1ch, 16bit, 1000ms, lang=vi-VN]"),
-            "expected deterministic transcript in tool result, got: {all_tool_texts}"
+            "expected deterministic WAV transcript in tool result, got: {all_tool_texts}"
+        );
+        assert!(
+            all_tool_texts.contains("[wav_transcript: 16000Hz, 1ch, 16bit, 2000ms, lang=vi-VN]"),
+            "expected deterministic MP4 extracted audio transcript in tool result, got: {all_tool_texts}"
         );
         // Find the second artifact_id (`not-audio.txt`) from `Published ... (id=art-..., ...)`
         let txt_art_id = req
@@ -1957,11 +1995,10 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
                 "Bóc băng ghi âm cuộc họp",
                 "Hãy gỡ băng file ghi âm đính kèm và viết biên bản.",
             )
-            .with_input_artifacts(vec![ArtifactInput::intermediate_bytes(
-                "cuoc-hop.wav",
-                "audio/wav",
-                wav_bytes.clone(),
-            )]),
+            .with_input_artifacts(vec![
+                ArtifactInput::intermediate_bytes("cuoc-hop.wav", "audio/wav", wav_bytes.clone()),
+                ArtifactInput::intermediate_bytes("ban-ghi-hinh.mp4", "video/mp4", mp4_bytes),
+            ]),
         )
         .await
         .unwrap();
@@ -1983,9 +2020,10 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
     let detail = task_mgr.get_task_detail(&task.id).await.unwrap();
     // Should include:
     // 1. Input WAV (`cuoc-hop.wav`, Audio, Intermediate)
-    // 2. `not-audio.txt` (Text, Intermediate)
-    // 3. `meeting-transcript.md` (Report, Primary)
-    assert_eq!(detail.artifacts.len(), 3);
+    // 2. Input MP4 (`ban-ghi-hinh.mp4`, Video, Intermediate)
+    // 3. `not-audio.txt` (Text, Intermediate)
+    // 4. `meeting-transcript.md` (Report, Primary)
+    assert_eq!(detail.artifacts.len(), 4);
     let input_wav = detail
         .artifacts
         .iter()
@@ -1997,6 +2035,19 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
     );
     assert_eq!(
         input_wav.role,
+        orchestrator_flow_rs::TaskArtifactRole::Intermediate
+    );
+    let input_mp4 = detail
+        .artifacts
+        .iter()
+        .find(|a| a.name == "ban-ghi-hinh.mp4")
+        .expect("input mp4 artifact recorded in task detail");
+    assert_eq!(
+        input_mp4.kind,
+        orchestrator_flow_rs::TaskArtifactKind::Video
+    );
+    assert_eq!(
+        input_mp4.role,
         orchestrator_flow_rs::TaskArtifactRole::Intermediate
     );
 

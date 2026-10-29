@@ -1190,7 +1190,7 @@ impl HostTool for VideoConcatTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: VIDEO_CONCAT_TOOL.to_string(),
-            description: "Concatenate 2 or more sequential MP4 video clip artifacts (`video_artifact_ids`) in order into a single continuous primary MP4 video artifact. ONLY use `video_concat` when the requested video duration exceeds `video_create`'s single-clip duration limit (`duration_secs > max_clip_duration_secs`), producing multiple clips (`clip_count > 1` / `requires_concat: true`).".to_string(),
+            description: "Concatenate 2 or more sequential MP4 video clip artifacts (`video_artifact_ids`) in order into a single continuous primary MP4 video artifact. Use `video_concat` when merging user-attached `.mp4` Input Artifacts or when `video_create` produces multiple clips (`clip_count > 1` / `requires_concat: true`).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["filename", "video_artifact_ids"],
@@ -2236,7 +2236,7 @@ fn write_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], chunk_data: &[u8]) {
 }
 
 /// Tạo file âm thanh RIFF/WAVE PCM 16-bit mono hợp lệ.
-fn synthesize_pcm_wav(text: &str, sample_rate: u32, duration_ms: u64) -> Vec<u8> {
+pub(crate) fn synthesize_pcm_wav(text: &str, sample_rate: u32, duration_ms: u64) -> Vec<u8> {
     let num_samples = ((u64::from(sample_rate) * duration_ms) / 1000).max(160) as usize;
     let data_bytes_len = (num_samples * 2) as u32;
     let riff_size = 36u32.saturating_add(data_bytes_len);
@@ -2277,7 +2277,7 @@ fn synthesize_pcm_wav(text: &str, sample_rate: u32, duration_ms: u64) -> Vec<u8>
     wav
 }
 
-fn find_iso_bmff_box<'a>(mut data: &'a [u8], target: &[u8; 4]) -> Option<&'a [u8]> {
+pub(crate) fn find_iso_bmff_box<'a>(mut data: &'a [u8], target: &[u8; 4]) -> Option<&'a [u8]> {
     while data.len() >= 8 {
         let size32 = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
         let kind = &data[4..8];
@@ -2348,7 +2348,12 @@ pub fn inspect_mp4_duration_secs(bytes: &[u8]) -> Option<u32> {
 }
 
 /// Tạo container ISO BMFF / MP4 (`ftyp` + `moov/mvhd` + `mdat`) hợp lệ chứa metadata đặc tả cảnh video.
-fn encode_minimal_mp4(prompt: &str, width: u32, height: u32, duration_secs: u32) -> Vec<u8> {
+pub(crate) fn encode_minimal_mp4(
+    prompt: &str,
+    width: u32,
+    height: u32,
+    duration_secs: u32,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(256 + prompt.len());
     // Box 1: `ftyp` (24 bytes) - ISO Base Media File Format (`isom`, `mp42`)
     let ftyp_len: u32 = 24;

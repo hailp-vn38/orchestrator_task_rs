@@ -1,6 +1,7 @@
 //! Công cụ `HostTool` `asr_transcribe` và Seam [`AsrTranscriberBackend`] cho phép Subagent
-//! (`media_creator`) phiên âm các file âm thanh `.wav` trong `ArtifactStore` của Task.
+//! (`media_creator`) phiên âm các file âm thanh `.wav` hoặc video `.mp4` trong `ArtifactStore` của Task.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use orchestrator_agent_rs::{
@@ -9,12 +10,15 @@ use orchestrator_agent_rs::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::tools::media_artifacts::{
+    find_iso_bmff_box, inspect_mp4_duration_secs, synthesize_pcm_wav,
+};
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
-/// Tên công cụ phiên âm file `.wav` trong `ArtifactStore`.
+/// Tên công cụ phiên âm file `.wav` hoặc `.mp4` trong `ArtifactStore`.
 pub const ASR_TRANSCRIBE_TOOL: &str = "asr_transcribe";
 
-/// Mã lỗi ổn định khi artifact âm thanh không phải định dạng `.wav` hợp lệ.
+/// Mã lỗi ổn định khi artifact âm thanh/video không phải định dạng `.wav` hoặc `.mp4` hợp lệ.
 pub const CODE_ASR_UNSUPPORTED_AUDIO: &str = "ASR_UNSUPPORTED_AUDIO";
 
 /// Định dạng mẫu âm thanh bên trong container `.wav`.
@@ -175,6 +179,104 @@ pub fn inspect_wav_bytes(bytes: &[u8]) -> Result<WavHeaderInfo, String> {
     })
 }
 
+/// Kiểm tra tính hợp lệ của container ISO BMFF / MP4 (`ftyp` + `moov`/`mdat`) và trả về thời lượng ước tính (`duration_ms`).
+pub fn inspect_mp4_bytes(bytes: &[u8]) -> Result<u64, String> {
+    if bytes.len() < 12 {
+        return Err("file is shorter than 12-byte ISO BMFF / MP4 header".to_string());
+    }
+    if &bytes[4..8] != b"ftyp" && find_iso_bmff_box(bytes, b"ftyp").is_none() {
+        return Err("missing ISO BMFF / MP4 ftyp box".to_string());
+    }
+    if find_iso_bmff_box(bytes, b"moov").is_none() && find_iso_bmff_box(bytes, b"mdat").is_none() {
+        return Err("MP4 container is missing moov/mdat boxes".to_string());
+    }
+    let duration_secs = inspect_mp4_duration_secs(bytes).unwrap_or(1).max(1);
+    Ok(u64::from(duration_secs).saturating_mul(1_000))
+}
+
+struct TempAsrExtractDir(PathBuf);
+
+impl TempAsrExtractDir {
+    fn create() -> Result<Self, String> {
+        let dir =
+            std::env::temp_dir().join(format!("orch_asr_mp4_extract_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create temp MP4 audio extract dir: {e}"))?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for TempAsrExtractDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Bóc tách luồng âm thanh từ container `.mp4` thành dữ liệu `.wav` chuẩn (16 kHz, mono, 16-bit PCM).
+///
+/// - Với container synthetic của [`crate::tools::media_artifacts::DefaultVideoGeneratorBackend`] (`mdat` bắt đầu bằng `MP4_STREAM|`),
+///   tổng hợp trực tiếp PCM WAV in-process từ thời lượng và kịch bản của clip để chạy kiểm thử độc lập không cần `ffmpeg`.
+/// - Với file `.mp4` thực tế, gọi `ffmpeg -vn -ac 1 -ar 16000 -sample_fmt s16 -f wav` trong thư mục tạm có RAII guard.
+pub async fn extract_wav_from_mp4_bytes(mp4_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let duration_ms = inspect_mp4_bytes(mp4_bytes)?;
+
+    if let Some(mdat) = find_iso_bmff_box(mp4_bytes, b"mdat") {
+        if let Ok(stream) = std::str::from_utf8(mdat) {
+            if stream.starts_with("MP4_STREAM|") {
+                let prompt = stream
+                    .split('|')
+                    .find_map(|part| part.strip_prefix("prompt="))
+                    .unwrap_or("mp4-video-audio");
+                return Ok(synthesize_pcm_wav(
+                    prompt,
+                    16_000,
+                    duration_ms.clamp(250, 10_000),
+                ));
+            }
+        }
+    }
+
+    let temp_dir = TempAsrExtractDir::create()?;
+    let input_path = temp_dir.0.join("input.mp4");
+    let output_path = temp_dir.0.join("output.wav");
+    std::fs::write(&input_path, mp4_bytes)
+        .map_err(|e| format!("failed to write temporary MP4 file: {e}"))?;
+
+    let output = tokio::process::Command::new("ffmpeg")
+        .current_dir(&temp_dir.0)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "input.mp4",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-sample_fmt",
+            "s16",
+            "-f",
+            "wav",
+            "output.wav",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("failed to invoke ffmpeg for MP4 audio extraction: {e}"))?;
+
+    if !output.status.success() || !output_path.exists() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ffmpeg could not extract audio track from MP4: {}",
+            stderr.trim()
+        ));
+    }
+
+    std::fs::read(&output_path).map_err(|e| format!("failed to read extracted WAV output: {e}"))
+}
+
 /// Yêu cầu phiên âm gửi tới [`AsrTranscriberBackend`].
 #[derive(Debug, Clone)]
 pub struct AsrTranscriptionRequest {
@@ -275,7 +377,7 @@ impl HostTool for AsrTranscribeTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: ASR_TRANSCRIBE_TOOL.to_string(),
-            description: "Transcribe spoken audio from a `.wav` Task Artifact (`artifact_id`) in the current Task's ArtifactStore into text using the configured ASR provider.".to_string(),
+            description: "Transcribe spoken audio from a `.wav` audio or `.mp4` video Task Artifact (`artifact_id`) in the current Task's ArtifactStore into text using the configured ASR provider.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["artifact_id"],
@@ -283,7 +385,7 @@ impl HostTool for AsrTranscribeTool {
                 "properties": {
                     "artifact_id": {
                         "type": "string",
-                        "description": "Artifact ID (e.g. 'art-...') of the .wav audio file in the current Task's ArtifactStore."
+                        "description": "Artifact ID (e.g. 'art-...') of the .wav audio or .mp4 video file in the current Task's ArtifactStore."
                     },
                     "language": {
                         "type": "string",
@@ -310,17 +412,42 @@ impl HostTool for AsrTranscribeTool {
             .map(str::to_string);
 
         let reader = ctx.artifacts().open(artifact_id).await?;
-        let wav_bytes = reader
+        let raw_bytes = reader
             .read_all()
             .await
             .map_err(|e| host_tool_err("ARTIFACT_INTEGRITY", e.to_string()))?;
 
-        let header = inspect_wav_bytes(&wav_bytes).map_err(|e| {
-            host_tool_err(
-                CODE_ASR_UNSUPPORTED_AUDIO,
-                format!("Artifact '{artifact_id}' is not a valid .wav audio file: {e}"),
-            )
-        })?;
+        let (wav_bytes, header) = match inspect_wav_bytes(&raw_bytes) {
+            Ok(h) => (raw_bytes, h),
+            Err(wav_err) => {
+                if inspect_mp4_bytes(&raw_bytes).is_ok() {
+                    let extracted = extract_wav_from_mp4_bytes(&raw_bytes).await.map_err(|e| {
+                        host_tool_err(
+                            CODE_ASR_UNSUPPORTED_AUDIO,
+                            format!(
+                                "Artifact '{artifact_id}' is an .mp4 file without a readable audio track: {e}"
+                            ),
+                        )
+                    })?;
+                    let h = inspect_wav_bytes(&extracted).map_err(|e| {
+                        host_tool_err(
+                            CODE_ASR_UNSUPPORTED_AUDIO,
+                            format!(
+                                "Extracted WAV from MP4 artifact '{artifact_id}' is invalid: {e}"
+                            ),
+                        )
+                    })?;
+                    (extracted, h)
+                } else {
+                    return Err(host_tool_err(
+                        CODE_ASR_UNSUPPORTED_AUDIO,
+                        format!(
+                            "Artifact '{artifact_id}' is not a valid .wav audio or .mp4 video file: {wav_err}"
+                        ),
+                    ));
+                }
+            }
+        };
 
         let req = AsrTranscriptionRequest {
             wav_bytes,
@@ -455,5 +582,23 @@ mod tests {
         let mut truncated = build_pcm16_wav(16_000, 1, 100);
         truncated.truncate(truncated.len() - 10);
         assert!(inspect_wav_bytes(&truncated).is_err());
+    }
+
+    #[tokio::test]
+    async fn inspect_and_extract_wav_from_mp4_bytes_works_for_minimal_mp4() {
+        let mp4 = crate::tools::media_artifacts::encode_minimal_mp4("Xin chào MP4", 640, 360, 2);
+        let dur_ms = inspect_mp4_bytes(&mp4).expect("valid minimal mp4");
+        assert_eq!(dur_ms, 2_000);
+
+        let wav = extract_wav_from_mp4_bytes(&mp4)
+            .await
+            .expect("extracted wav from synthetic mp4");
+        let header = inspect_wav_bytes(&wav).expect("valid extracted wav header");
+        assert_eq!(header.sample_rate, 16_000);
+        assert_eq!(header.channels, 1);
+        assert_eq!(header.bits_per_sample, 16);
+        assert_eq!(header.duration_ms, 2_000);
+
+        assert!(inspect_mp4_bytes(b"not-an-mp4").is_err());
     }
 }

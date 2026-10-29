@@ -937,7 +937,7 @@ fn format_prompt_with_artifacts(
     }
     let mut out = String::with_capacity(prompt.len() + 128 * refs.len());
     out.push_str(prompt);
-    out.push_str("\n\nAttached audio artifacts:");
+    out.push_str("\n\nAttached input artifacts:");
     for r in refs {
         out.push_str(&format!(
             "\n- {} ({}, {} bytes, mime={})",
