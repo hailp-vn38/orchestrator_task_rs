@@ -37,7 +37,7 @@ The `(owner_id, workspace_id)` identity pair that isolates Tasks and Schedules (
 _Avoid_: Tenant, Account, Namespace
 
 **Task Artifact**:
-An immutable, integrity-verified deliverable or intermediate file produced by a Root Agent or Subagent during a Task's execution and owned by that Task's session family.
+An immutable, integrity-verified deliverable or intermediate file attached at Task creation or produced by a Root Agent or Subagent during a Task's execution and owned by that Task's session family.
 _Avoid_: Scratch File, Tool Output String, Unverified Attachment
 
 **Artifact Catalog**:

@@ -86,6 +86,7 @@ async fn handle_task_create(
         schedule_id: None,
         existing_session_id: None,
         related_wiki_links,
+        input_artifacts: Vec::new(),
     };
 
     let task = core.create_and_start_task(scope, req).await?;

@@ -12,6 +12,7 @@ use crate::error::TaskResult;
 use crate::runtime::SharedTaskCore;
 use crate::types::{AgentCatalogEntry, TaskScope};
 
+pub mod asr_transcribe;
 pub(crate) mod catalog;
 pub(crate) mod host_adapter;
 pub mod markdown_report;
@@ -23,6 +24,11 @@ pub mod web;
 pub mod wiki_bridge;
 pub mod youtube;
 
+pub use asr_transcribe::{
+    inspect_wav_bytes, AsrTranscribeTool, AsrTranscriberBackend, AsrTranscriptionRequest,
+    DefaultAsrTranscriberBackend, TranscribedAudioPayload, WavHeaderInfo, WavSampleFormat,
+    ASR_TRANSCRIBE_TOOL, CODE_ASR_UNSUPPORTED_AUDIO,
+};
 pub use markdown_report::{report_host_tools, MarkdownCreateTool, MarkdownReadTool};
 pub use media_artifacts::{
     inspect_mp4_duration_secs, media_host_tools, media_host_tools_with_video, normalize_video_stem,

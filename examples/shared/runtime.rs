@@ -244,6 +244,7 @@ impl HomelabExampleApp {
                     "image_create",
                     "video_create",
                     "tts_synthesize",
+                    "asr_transcribe",
                     "artifact_create",
                 ])
                 .with_steps(12),

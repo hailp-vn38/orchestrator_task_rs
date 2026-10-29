@@ -1736,3 +1736,298 @@ async fn watcher_emits_task_progress_for_message_committed_and_tool_completed() 
     task_mgr.shutdown().await.unwrap();
     orch.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
+    use orchestrator_agent_rs::test_support::{ModelRequest, ModelResponse, ModelToolCall};
+    use orchestrator_agent_rs::ArtifactInput;
+    use orchestrator_flow_rs::ErrorCode;
+
+    fn build_test_pcm16_wav(sample_rate: u32, num_samples: u32) -> Vec<u8> {
+        let data_len = num_samples * 2;
+        let riff_len = 36 + data_len;
+        let byte_rate = sample_rate * 2;
+        let mut out = Vec::with_capacity(44 + data_len as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&riff_len.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&byte_rate.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        out.resize(44 + data_len as usize, 0u8);
+        out
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let layout = WorkspaceLayout::new(dir.path().join("workspace"));
+    layout.ensure_dirs().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a multi-modal orchestrator.").unwrap();
+
+    let engine = Arc::new(WikiEngine::open(layout.wiki_vault_dir()).unwrap());
+    engine.apply_template(WikiTemplateId::Personal).unwrap();
+    let autoflow_notify = Arc::new(Notify::new());
+    let toolkit = WorkspaceToolKit::from_layout(&layout, engine.clone(), autoflow_notify.clone());
+
+    let task_cfg = TaskConfig::from_layout(&layout).with_default_agent("daily_root");
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    let wav_bytes = build_test_pcm16_wav(16_000, 16_000);
+
+    let gw = ScriptedGateway::new();
+    // 1. Root agent inspects user prompt containing `[Attached Input Artifacts]` and forwards `art-...` to `media_creator`
+    gw.push_with(|req: &ModelRequest| {
+        let user_text = req
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let art_id = user_text
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .find(|tok| tok.starts_with("art-") && tok.len() > 8)
+            .expect("root prompt should contain staged input artifact_id")
+            .to_string();
+        ModelResponse {
+            text: "Ủy quyền cho media_creator bóc băng file WAV.".to_string(),
+            finish_reason: "tool_use".to_string(),
+            tool_calls: vec![ModelToolCall {
+                id: "call_sub_asr".to_string(),
+                name: "subagent".to_string(),
+                arguments: json!({
+                    "agent": "media_creator",
+                    "description": "Transcribe user WAV and test invalid audio guard",
+                    "prompt": format!("Please transcribe artifact {art_id} and write a markdown summary.")
+                }),
+            }],
+            usage: None,
+        }
+    });
+    // 2. Subagent `media_creator` extracts `art_id` from prompt, calls `asr_transcribe` on the valid WAV
+    //    and creates a non-WAV text artifact to verify `ASR_UNSUPPORTED_AUDIO`.
+    gw.push_with(|req: &ModelRequest| {
+        let sub_text = req
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let art_id = sub_text
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .find(|tok| tok.starts_with("art-") && tok.len() > 8)
+            .expect("subagent prompt should contain forwarded artifact_id")
+            .to_string();
+        ModelResponse {
+            text: "Đang gọi asr_transcribe cho file WAV.".to_string(),
+            finish_reason: "tool_use".to_string(),
+            tool_calls: vec![
+                ModelToolCall {
+                    id: "call_asr_ok".to_string(),
+                    name: "asr_transcribe".to_string(),
+                    arguments: json!({
+                        "artifact_id": art_id,
+                        "language": "vi-VN"
+                    }),
+                },
+                ModelToolCall {
+                    id: "call_txt_art".to_string(),
+                    name: "artifact_create".to_string(),
+                    arguments: json!({
+                        "filename": "not-audio.txt",
+                        "mime_type": "text/plain",
+                        "content": "plain text payload",
+                        "role": "intermediate"
+                    }),
+                },
+            ],
+            usage: None,
+        }
+    });
+    // 3. Subagent `media_creator` tries `asr_transcribe` on the non-WAV artifact (expects `ASR_UNSUPPORTED_AUDIO`)
+    //    and writes a markdown report with the transcript.
+    gw.push_with(|req: &ModelRequest| {
+        let all_tool_texts = req
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_tool_texts.contains("[wav_transcript: 16000Hz, 1ch, 16bit, 1000ms, lang=vi-VN]"),
+            "expected deterministic transcript in tool result, got: {all_tool_texts}"
+        );
+        // Find the second artifact_id (`not-audio.txt`) from `Published ... (id=art-..., ...)`
+        let txt_art_id = req
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| {
+                if m.text.contains("not-audio.txt") {
+                    m.text
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                        .find(|tok| tok.starts_with("art-") && tok.len() > 8)
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .expect("not-audio.txt artifact_id");
+        ModelResponse {
+            text: "Kiểm tra lỗi định dạng và tạo báo cáo.".to_string(),
+            finish_reason: "tool_use".to_string(),
+            tool_calls: vec![
+                ModelToolCall {
+                    id: "call_asr_bad".to_string(),
+                    name: "asr_transcribe".to_string(),
+                    arguments: json!({
+                        "artifact_id": txt_art_id
+                    }),
+                },
+                ModelToolCall {
+                    id: "call_md_out".to_string(),
+                    name: "markdown_create".to_string(),
+                    arguments: json!({
+                        "filename": "meeting-transcript.md",
+                        "title": "Biên bản cuộc họp",
+                        "markdown_body": "Nội dung đã bóc băng từ file WAV đính kèm."
+                    }),
+                },
+            ],
+            usage: None,
+        }
+    });
+    // 4. Subagent finishes
+    gw.push_text("Đã hoàn tất bóc băng âm thanh và tạo biên bản cuộc họp.");
+    // 5. Root agent finishes
+    gw.push_text("Biên bản cuộc họp từ file ghi âm đã sẵn sàng.");
+    // 6. Delayed response for the busy-session test below
+    gw.push_delayed(
+        Duration::from_millis(500),
+        ModelResponse {
+            text: "Busy turn completed.".to_string(),
+            finish_reason: "stop".to_string(),
+            tool_calls: Vec::new(),
+            usage: None,
+        },
+    );
+
+    let root_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily root")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["subagent"])
+        .with_allowed_subagents(["media_creator"])
+        .with_steps(6);
+
+    let media_subagent = AgentDefinition::new("media_creator", "test", "gpt-test")
+        .with_mode(AgentMode::Subagent)
+        .with_description("Multi-media artifact creator & transcriber")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["asr_transcribe", "artifact_create", "markdown_create"])
+        .with_steps(8);
+
+    let mut builder = Orchestrator::builder(OrchestratorConfig::new(
+        test_llm_config(),
+        vec![root_agent, media_subagent],
+        layout.orchestrator_store_dir(),
+    ))
+    .with_gateway(gw);
+
+    for tool in toolkit.all_host_tools(&task_init) {
+        builder = builder.register_tool(tool);
+    }
+    let orch = Arc::new(builder.build().await.unwrap());
+    let task_mgr = task_init
+        .with_orchestrator(orch.clone())
+        .start()
+        .await
+        .unwrap();
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    let task = task_mgr
+        .create_task(
+            CreateTaskRequest::new(
+                "Bóc băng ghi âm cuộc họp",
+                "Hãy gỡ băng file ghi âm đính kèm và viết biên bản.",
+            )
+            .with_input_artifacts(vec![ArtifactInput::intermediate_bytes(
+                "cuoc-hop.wav",
+                "audio/wav",
+                wav_bytes.clone(),
+            )]),
+        )
+        .await
+        .unwrap();
+
+    let mut terminal_reached = false;
+    for _ in 0..120 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(3), sub.recv()).await
+        {
+            if t.id == task.id {
+                assert_eq!(t.status, TaskStatus::Completed);
+                terminal_reached = true;
+                break;
+            }
+        }
+    }
+    assert!(terminal_reached, "task should reach TaskTerminal");
+
+    let detail = task_mgr.get_task_detail(&task.id).await.unwrap();
+    // Should include:
+    // 1. Input WAV (`cuoc-hop.wav`, Audio, Intermediate)
+    // 2. `not-audio.txt` (Text, Intermediate)
+    // 3. `meeting-transcript.md` (Report, Primary)
+    assert_eq!(detail.artifacts.len(), 3);
+    let input_wav = detail
+        .artifacts
+        .iter()
+        .find(|a| a.name == "cuoc-hop.wav")
+        .expect("input wav artifact recorded in task detail");
+    assert_eq!(
+        input_wav.kind,
+        orchestrator_flow_rs::TaskArtifactKind::Audio
+    );
+    assert_eq!(
+        input_wav.role,
+        orchestrator_flow_rs::TaskArtifactRole::Intermediate
+    );
+
+    let summary = detail.execution_summary.expect("execution_summary");
+    assert!(summary
+        .failed_error_codes
+        .contains(&"ASR_UNSUPPORTED_AUDIO".to_string()));
+
+    // Verify `SessionBusy` rejection when `existing_session_id` is currently busy and `input_artifacts` is non-empty
+    let running_task = task_mgr
+        .create_task(CreateTaskRequest::new(
+            "Slow task holding session",
+            "Run slow turn",
+        ))
+        .await
+        .unwrap();
+
+    let busy_err = task_mgr
+        .create_task(
+            CreateTaskRequest::new("Busy attachment task", "Transcribe while busy")
+                .with_existing_session_id(running_task.session_id.clone())
+                .with_input_artifacts(vec![ArtifactInput::intermediate_bytes(
+                    "second.wav",
+                    "audio/wav",
+                    wav_bytes,
+                )]),
+        )
+        .await
+        .expect_err("must reject with SessionBusy when session is busy and has input_artifacts");
+    assert_eq!(busy_err.code(), ErrorCode::SessionBusy);
+
+    task_mgr.shutdown().await.unwrap();
+    orch.shutdown().await.unwrap();
+}

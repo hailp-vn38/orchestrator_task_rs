@@ -47,7 +47,19 @@ impl SharedTaskCore {
         };
 
         let task_id = new_id();
-        match orch.submit(&caller, &session_id, prompt.to_string()).await {
+        let has_input_artifacts = !req.input_artifacts.is_empty();
+        let submitted = if has_input_artifacts {
+            let prompt_owned = prompt.to_string();
+            orch.submit_with_artifacts(&caller, &session_id, req.input_artifacts, move |refs| {
+                format_prompt_with_artifacts(&prompt_owned, refs)
+            })
+            .await
+            .map(|(accepted, _)| accepted)
+        } else {
+            orch.submit(&caller, &session_id, prompt.to_string()).await
+        };
+
+        match submitted {
             Ok(accepted) => {
                 let task = self
                     .store
@@ -72,6 +84,9 @@ impl SharedTaskCore {
                 watcher::ensure_task_watcher(Arc::clone(self), task.clone());
                 Ok(task)
             }
+            Err(err) if err.code() == OrchErrorCode::SessionBusy && has_input_artifacts => Err(
+                TaskError::new(crate::error::ErrorCode::SessionBusy, err.to_string()),
+            ),
             Err(err) if err.code() == OrchErrorCode::SessionBusy => {
                 // Nếu tái sử dụng session đang bận, tạo task ở trạng thái 'queued' kèm followup chờ
                 let task = self
@@ -910,5 +925,24 @@ fn clip_preview(text: &str, max_chars: usize) -> String {
     }
     let mut out: String = trimmed.chars().take(max_chars).collect();
     out.push('…');
+    out
+}
+
+fn format_prompt_with_artifacts(
+    prompt: &str,
+    refs: &[orchestrator_agent_rs::ArtifactRef],
+) -> String {
+    if refs.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = String::with_capacity(prompt.len() + 128 * refs.len());
+    out.push_str(prompt);
+    out.push_str("\n\nAttached audio artifacts:");
+    for r in refs {
+        out.push_str(&format!(
+            "\n- {} ({}, {} bytes, mime={})",
+            r.id, r.name, r.size_bytes, r.mime_type
+        ));
+    }
     out
 }

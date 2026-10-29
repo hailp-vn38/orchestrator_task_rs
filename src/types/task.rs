@@ -1,6 +1,6 @@
 //! Value types cho Task, Followup, và Agent Catalog.
 
-use orchestrator_agent_rs::{FamilySnapshot, RunStatus};
+use orchestrator_agent_rs::{ArtifactInput, FamilySnapshot, RunStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::config::TargetAgent;
@@ -92,7 +92,7 @@ impl TaskSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTaskRequest {
     pub title: String,
     pub prompt: String,
@@ -104,6 +104,10 @@ pub struct CreateTaskRequest {
     /// Nếu truyền `session_id` có sẵn, Task sẽ submit turn mới vào session đó.
     pub existing_session_id: Option<String>,
     pub related_wiki_links: Vec<String>,
+    /// Danh sách các `ArtifactInput` (như file `.wav` tải lên) được stage và gắn nguyên tử
+    /// vào `(session_id, turn_id)` của lượt chạy đầu tiên.
+    #[serde(skip)]
+    pub input_artifacts: Vec<ArtifactInput>,
 }
 
 impl CreateTaskRequest {
@@ -116,6 +120,7 @@ impl CreateTaskRequest {
             schedule_id: None,
             existing_session_id: None,
             related_wiki_links: Vec::new(),
+            input_artifacts: Vec::new(),
         }
     }
 
@@ -131,6 +136,16 @@ impl CreateTaskRequest {
 
     pub fn with_wiki_links(mut self, links: Vec<String>) -> Self {
         self.related_wiki_links = links;
+        self
+    }
+
+    pub fn with_existing_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.existing_session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_input_artifacts(mut self, artifacts: Vec<ArtifactInput>) -> Self {
+        self.input_artifacts = artifacts;
         self
     }
 }

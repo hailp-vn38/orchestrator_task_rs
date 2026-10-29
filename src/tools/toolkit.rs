@@ -11,6 +11,9 @@ use tokio::sync::Notify;
 
 use crate::config::WorkspaceLayout;
 use crate::manager::TaskManagerInit;
+use crate::tools::asr_transcribe::{
+    AsrTranscribeTool, AsrTranscriberBackend, DefaultAsrTranscriberBackend,
+};
 use crate::tools::markdown_report::report_host_tools;
 use crate::tools::media_artifacts::{
     media_host_tools_with_video, DefaultImageGeneratorBackend, DefaultTtsSynthesizerBackend,
@@ -19,7 +22,7 @@ use crate::tools::media_artifacts::{
 };
 use crate::tools::pdf::{pdf_host_tools, SharedPdfState};
 use crate::tools::web::{web_host_tools, HtmlWorkspace};
-use crate::tools::wiki_bridge::{AddToSourcesTool, wiki_host_tools, wiki_readonly_host_tools};
+use crate::tools::wiki_bridge::{wiki_host_tools, wiki_readonly_host_tools, AddToSourcesTool};
 use crate::tools::youtube::{youtube_host_tools, YoutubeCollectorEnv};
 
 const DEFAULT_CONTEXT_LIMIT_TOKENS: usize = 200_000;
@@ -53,6 +56,7 @@ pub struct WorkspaceToolKit {
     pub image_backend: Arc<dyn ImageGeneratorBackend>,
     pub video_backend: Arc<dyn VideoGeneratorBackend>,
     pub tts_backend: Arc<dyn TtsSynthesizerBackend>,
+    pub asr_backend: Arc<dyn AsrTranscriberBackend>,
 }
 
 impl WorkspaceToolKit {
@@ -116,6 +120,7 @@ impl WorkspaceToolKit {
             image_backend: Arc::new(DefaultImageGeneratorBackend),
             video_backend: Arc::new(DefaultVideoGeneratorBackend),
             tts_backend: Arc::new(DefaultTtsSynthesizerBackend),
+            asr_backend: Arc::new(DefaultAsrTranscriberBackend),
         }
     }
 
@@ -134,6 +139,12 @@ impl WorkspaceToolKit {
     /// Tùy chỉnh `TtsSynthesizerBackend` cho công cụ `tts_synthesize`.
     pub fn with_tts_backend(mut self, backend: Arc<dyn TtsSynthesizerBackend>) -> Self {
         self.tts_backend = backend;
+        self
+    }
+
+    /// Tùy chỉnh `AsrTranscriberBackend` cho công cụ `asr_transcribe`.
+    pub fn with_asr_backend(mut self, backend: Arc<dyn AsrTranscriberBackend>) -> Self {
+        self.asr_backend = backend;
         self
     }
 
@@ -208,14 +219,16 @@ impl WorkspaceToolKit {
         report_host_tools(self.reports_dir.clone())
     }
 
-    /// Xuất bộ 4 `HostTool` đa phương tiện & đa định dạng (`image_create`, `video_create`, `tts_synthesize`, `artifact_create`).
+    /// Xuất bộ `HostTool` đa phương tiện & đa định dạng (`image_create`, `video_create`, `video_concat`, `tts_synthesize`, `asr_transcribe`, `artifact_create`).
     pub fn media_host_tools(&self) -> Vec<Arc<dyn HostTool>> {
-        media_host_tools_with_video(
+        let mut tools = media_host_tools_with_video(
             Arc::clone(&self.image_backend),
             Arc::clone(&self.video_backend),
             Arc::clone(&self.tts_backend),
             Some(self.reports_dir.clone()),
-        )
+        );
+        tools.push(AsrTranscribeTool::with_backend(Arc::clone(&self.asr_backend)).into_host_tool());
+        tools
     }
 
     /// Xuất cặp `HostTool` `[yt_list_playlist, yt_fetch_transcript]`.

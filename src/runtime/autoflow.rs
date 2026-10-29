@@ -251,6 +251,7 @@ pub(crate) fn spawn_autoflow_loop(
                     schedule_id: None,
                     existing_session_id: None,
                     related_wiki_links: Vec::new(),
+                    input_artifacts: Vec::new(),
                 };
 
                 match core.create_and_start_task(&scope, req).await {
