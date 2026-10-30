@@ -106,10 +106,9 @@ impl YoutubeCollectorEnv {
         let work = self.work_dir.clone();
         let langs = self.langs.clone();
         let vid = video_id.to_string();
-        let transcript =
-            tokio::task::spawn_blocking(move || fetch_transcript(&work, &vid, &langs))
-                .await
-                .map_err(|e| host_tool_err("INTERNAL", e.to_string()))??;
+        let transcript = tokio::task::spawn_blocking(move || fetch_transcript(&work, &vid, &langs))
+            .await
+            .map_err(|e| host_tool_err("INTERNAL", e.to_string()))??;
         self.transcripts
             .lock()
             .unwrap_or_else(|e| e.into_inner())

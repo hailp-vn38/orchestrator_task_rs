@@ -1307,6 +1307,7 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
 
     let gw = ScriptedGateway::new();
     // 1. Root agent delegates to `media_creator` subagent
+    // 1. Root agent delegates visual media to `media_creator`
     gw.push_tool_calls(
         "Delegating to media_creator subagent",
         vec![(
@@ -1314,30 +1315,18 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
             "subagent",
             json!({
                 "agent": "media_creator",
-                "description": "Create report, PNG banner, SVG diagram, TTS audio, and JSON metrics",
-                "prompt": "Generate all 5 artifacts for the B200 briefing."
+                "description": "Create PNG banner, SVG diagram, and MP4 video",
+                "prompt": "Generate PNG, SVG, and MP4 visual artifacts for the B200 briefing."
             }),
         )],
     );
-    // 2. Subagent `media_creator` calls 6 tools in sequence:
-    //    - `markdown_create` (Report)
+    // 2. Subagent `media_creator` calls 3 visual tools:
     //    - `image_create` PNG (Image)
     //    - `image_create` SVG (Image)
     //    - `video_create` MP4 (Video)
-    //    - `tts_synthesize` WAV (Audio)
-    //    - `artifact_create` JSON (Data, intermediate)
     gw.push_tool_calls(
-        "Creating all 6 multi-kind artifacts",
+        "Creating 3 visual artifacts",
         vec![
-            (
-                "call_md",
-                "markdown_create",
-                json!({
-                    "filename": "b200-briefing.md",
-                    "title": "B200 Architecture Briefing",
-                    "markdown_body": "Blackwell B200 delivers 20 PFLOPS FP4 with NVLink 5."
-                }),
-            ),
             (
                 "call_png",
                 "image_create",
@@ -1373,6 +1362,39 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
                     "duration_secs": 5
                 }),
             ),
+        ],
+    );
+    // 3. Subagent `media_creator` finishes
+    gw.push_text("Đã tạo 3 visual artifacts: ảnh PNG, sơ đồ SVG và video MP4.");
+    // 4. Root agent delegates TTS, JSON data, and Markdown report to `media_processor`
+    gw.push_tool_calls(
+        "Delegating to media_processor subagent",
+        vec![(
+            "call_sub_proc",
+            "subagent",
+            json!({
+                "agent": "media_processor",
+                "description": "Create report, TTS audio, and JSON metrics",
+                "prompt": "Generate Markdown report, TTS WAV narration, and JSON benchmarks."
+            }),
+        )],
+    );
+    // 5. Subagent `media_processor` calls 3 tools:
+    //    - `markdown_create` (Report)
+    //    - `tts_synthesize` WAV (Audio)
+    //    - `artifact_create` JSON (Data, intermediate)
+    gw.push_tool_calls(
+        "Creating report, TTS audio, and JSON data artifacts",
+        vec![
+            (
+                "call_md",
+                "markdown_create",
+                json!({
+                    "filename": "b200-briefing.md",
+                    "title": "B200 Architecture Briefing",
+                    "markdown_body": "Blackwell B200 delivers 20 PFLOPS FP4 with NVLink 5."
+                }),
+            ),
             (
                 "call_tts",
                 "tts_synthesize",
@@ -1396,9 +1418,9 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
             ),
         ],
     );
-    // 3. Subagent finishes
-    gw.push_text("Đã tạo đủ 6 artifacts: báo cáo Markdown, ảnh PNG, sơ đồ SVG, video MP4, giọng đọc TTS WAV và dữ liệu JSON.");
-    // 4. Root agent finishes
+    // 6. Subagent `media_processor` finishes
+    gw.push_text("Đã tạo báo cáo Markdown, giọng đọc TTS WAV và dữ liệu JSON.");
+    // 7. Root agent finishes
     gw.push_text("Hoàn tất gói đa phương tiện B200 gồm báo cáo, hình ảnh, video và âm thanh TTS.");
 
     let root_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
@@ -1406,25 +1428,26 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
         .with_description("Daily root")
         .with_prompt_path(&prompt_path)
         .with_allowed_tools(["subagent"])
-        .with_allowed_subagents(["media_creator"])
+        .with_allowed_subagents(["media_creator", "media_processor"])
         .with_steps(6);
 
     let media_subagent = AgentDefinition::new("media_creator", "test", "gpt-test")
         .with_mode(AgentMode::Subagent)
-        .with_description("Multi-media artifact creator")
+        .with_description("Visual media artifact creator")
         .with_prompt_path(&prompt_path)
-        .with_allowed_tools([
-            "markdown_create",
-            "image_create",
-            "video_create",
-            "tts_synthesize",
-            "artifact_create",
-        ])
+        .with_allowed_tools(["image_create", "video_create"])
+        .with_steps(8);
+
+    let processor_subagent = AgentDefinition::new("media_processor", "test", "gpt-test")
+        .with_mode(AgentMode::Subagent)
+        .with_description("Audio/video processor & structured artifact publisher")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["markdown_create", "tts_synthesize", "artifact_create"])
         .with_steps(8);
 
     let mut builder = Orchestrator::builder(OrchestratorConfig::new(
         test_llm_config(),
-        vec![root_agent, media_subagent],
+        vec![root_agent, media_subagent, processor_subagent],
         layout.orchestrator_store_dir(),
     ))
     .with_gateway(gw);
@@ -1486,7 +1509,7 @@ async fn subagent_multi_kind_artifacts_report_image_tts_and_data_verified() {
         .expect("markdown artifact");
     assert_eq!(md_art.kind, orchestrator_flow_rs::TaskArtifactKind::Report);
     assert_eq!(md_art.role, orchestrator_flow_rs::TaskArtifactRole::Primary);
-    assert_eq!(md_art.producer_agent_id, "media_creator");
+    assert_eq!(md_art.producer_agent_id, "media_processor");
     assert_eq!(
         md_art.producer_tool_name.as_deref(),
         Some("markdown_create")
@@ -1814,13 +1837,13 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
             "root prompt should contain both WAV and MP4 staged input artifact_ids: {user_text}"
         );
         ModelResponse {
-            text: "Ủy quyền cho media_creator bóc băng file WAV và MP4.".to_string(),
+            text: "Ủy quyền cho media_processor bóc băng file WAV và MP4.".to_string(),
             finish_reason: "tool_use".to_string(),
             tool_calls: vec![ModelToolCall {
                 id: "call_sub_asr".to_string(),
                 name: "subagent".to_string(),
                 arguments: json!({
-                    "agent": "media_creator",
+                    "agent": "media_processor",
                     "description": "Transcribe user WAV and MP4 and test invalid audio guard",
                     "prompt": format!(
                         "Please transcribe artifacts {} and {} and write a markdown summary.",
@@ -1831,7 +1854,7 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
             usage: None,
         }
     });
-    // 2. Subagent `media_creator` extracts both `art_id`s from prompt, calls `asr_transcribe` on the WAV and MP4,
+    // 2. Subagent `media_processor` extracts both `art_id`s from prompt, calls `asr_transcribe` on the WAV and MP4,
     //    and creates a non-media text artifact to verify `ASR_UNSUPPORTED_AUDIO`.
     gw.push_with(|req: &ModelRequest| {
         let sub_text = req
@@ -1969,12 +1992,12 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
         .with_description("Daily root")
         .with_prompt_path(&prompt_path)
         .with_allowed_tools(["subagent"])
-        .with_allowed_subagents(["media_creator"])
+        .with_allowed_subagents(["media_processor"])
         .with_steps(6);
 
-    let media_subagent = AgentDefinition::new("media_creator", "test", "gpt-test")
+    let media_subagent = AgentDefinition::new("media_processor", "test", "gpt-test")
         .with_mode(AgentMode::Subagent)
-        .with_description("Multi-media artifact creator & transcriber")
+        .with_description("Audio/video processor & transcriber")
         .with_prompt_path(&prompt_path)
         .with_allowed_tools(["asr_transcribe", "artifact_create", "markdown_create"])
         .with_steps(8);
@@ -2105,11 +2128,10 @@ async fn add_to_sources_stages_markdown_body_when_zero_pdf_doc_index_and_empty_o
     engine.apply_template(WikiTemplateId::Research).unwrap();
     let autoflow_notify = Arc::new(Notify::new());
 
-    let task_init = TaskManager::prepare(
-        TaskConfig::from_layout(&layout).with_default_agent("report_stager"),
-    )
-    .await
-    .unwrap();
+    let task_init =
+        TaskManager::prepare(TaskConfig::from_layout(&layout).with_default_agent("report_stager"))
+            .await
+            .unwrap();
 
     let toolkit = WorkspaceToolKit::from_layout(&layout, engine.clone(), autoflow_notify.clone());
 

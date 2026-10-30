@@ -108,11 +108,7 @@ async fn run_task_watcher(core: Arc<SharedTaskCore>, initial_task: TaskView) {
     }
 }
 
-async fn emit_task_progress(
-    core: &SharedTaskCore,
-    task: &TaskView,
-    update: ProgressUpdate<'_>,
-) {
+async fn emit_task_progress(core: &SharedTaskCore, task: &TaskView, update: ProgressUpdate<'_>) {
     let _ = core.store.update_task_progress(&task.id, update).await;
     core.event_bus.emit(TaskEvent::TaskProgress {
         task_id: task.id.clone(),

@@ -163,6 +163,7 @@ impl HomelabExampleApp {
                     "wiki_researcher",
                     "report_stager",
                     "media_creator",
+                    "media_processor",
                     "reminder_planner",
                 ])
                 .with_steps(20),
@@ -235,16 +236,25 @@ impl HomelabExampleApp {
             AgentDefinition::new("media_creator", "live", &model)
                 .with_mode(AgentMode::Subagent)
                 .with_description(
-                    "Generates PNG/SVG images via image_create, MP4 videos via video_create, synthesizes TTS audio via tts_synthesize, and publishes structured Task Artifacts via artifact_create.",
+                    "Visual generation specialist: generates PNG/SVG images via image_create and MP4 videos via video_create.",
                 )
                 .with_prompt_path(prompts.join("media_creator.md"))
                 .with_context_limit_tokens(context_limit_tokens)
                 .with_max_output_tokens(max_output_tokens)
+                .with_allowed_tools(["image_create", "video_create"])
+                .with_steps(12),
+            AgentDefinition::new("media_processor", "live", &model)
+                .with_mode(AgentMode::Subagent)
+                .with_description(
+                    "Audio/Speech, Video Post-Processing & Structured Artifact specialist: transcribes WAV/MP4 via asr_transcribe, synthesizes TTS audio via tts_synthesize, merges MP4 clips via video_concat, and exports structured artifacts via artifact_create.",
+                )
+                .with_prompt_path(prompts.join("media_processor.md"))
+                .with_context_limit_tokens(context_limit_tokens)
+                .with_max_output_tokens(max_output_tokens)
                 .with_allowed_tools([
-                    "image_create",
-                    "video_create",
-                    "tts_synthesize",
                     "asr_transcribe",
+                    "tts_synthesize",
+                    "video_concat",
                     "artifact_create",
                 ])
                 .with_steps(12),

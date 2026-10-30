@@ -220,7 +220,9 @@ impl TaskManager {
         &self,
         filter: &TaskArtifactFilter,
     ) -> TaskResult<TaskArtifactCatalogPage> {
-        self.core.list_artifacts_catalog_internal(None, filter).await
+        self.core
+            .list_artifacts_catalog_internal(None, filter)
+            .await
     }
 
     /// Mở một Artifact thuộc về một Task trong `default_scope` để đọc/stream kèm xác minh SHA-256.

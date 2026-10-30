@@ -74,8 +74,7 @@ impl TaskStore {
         &self,
         scope: Option<&TaskScope>,
     ) -> TaskResult<Vec<TaskView>> {
-        let mut qb: QueryBuilder<Sqlite> =
-            QueryBuilder::new("SELECT * FROM tasks WHERE 1=1");
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM tasks WHERE 1=1");
         apply_scope_clause(&mut qb, scope);
         qb.push(" ORDER BY created_at DESC");
         let rows = qb
@@ -110,8 +109,7 @@ impl TaskStore {
             .map_err(db_err("count tasks"))?;
         let total: i64 = count_row.get("total");
 
-        let mut list_qb: QueryBuilder<Sqlite> =
-            QueryBuilder::new("SELECT * FROM tasks WHERE 1=1");
+        let mut list_qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM tasks WHERE 1=1");
         apply_scope_clause(&mut list_qb, scope);
         apply_task_filters(&mut list_qb, filter);
         list_qb.push(" ORDER BY created_at DESC LIMIT ");

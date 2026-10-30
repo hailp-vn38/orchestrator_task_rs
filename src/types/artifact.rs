@@ -337,4 +337,3 @@ pub struct TaskArtifactCatalogPage {
     pub total: u64,
     pub summary: TaskArtifactCatalogSummary,
 }
-
