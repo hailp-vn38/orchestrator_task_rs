@@ -19,6 +19,7 @@ pub mod markdown_report;
 pub mod media_artifacts;
 pub mod media_image;
 pub(crate) mod media_image_codecs;
+pub mod media_tts;
 pub mod media_video;
 pub mod media_video_concat;
 pub mod pdf;
@@ -41,8 +42,8 @@ pub use media_artifacts::{
     DefaultTtsSynthesizerBackend, DefaultVideoConcatBackend, DefaultVideoGeneratorBackend,
     GeneratedImagePayload, GeneratedVideoClip, GeneratedVideoPayload, ImageCreateTool,
     ImageGenerationRequest, ImageGeneratorBackend, ReferenceImageInput, SynthesizedAudioPayload,
-    TtsSynthesisRequest, TtsSynthesizeTool, TtsSynthesizerBackend, VideoConcatBackend,
-    VideoConcatInputClip, VideoConcatRequest, VideoConcatTool, VideoCreateTool,
+    TtsProviderConstraints, TtsSynthesisRequest, TtsSynthesizeTool, TtsSynthesizerBackend,
+    VideoConcatBackend, VideoConcatInputClip, VideoConcatRequest, VideoConcatTool, VideoCreateTool,
     VideoGenerationRequest, VideoGeneratorBackend, VideoProviderConstraints, DEFAULT_PNG_HEIGHT,
     DEFAULT_PNG_WIDTH, DEFAULT_SVG_HEIGHT, DEFAULT_SVG_WIDTH, DEFAULT_VIDEO_HEIGHT,
     DEFAULT_VIDEO_WIDTH, MAX_IMAGE_REFERENCES, MAX_REFERENCE_IMAGE_BYTES, VIDEO_CONCAT_TOOL,
