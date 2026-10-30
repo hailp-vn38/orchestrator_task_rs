@@ -293,6 +293,7 @@ impl HostTool for AnydocInspectPdfTool {
         let filter_idx = args
             .get("doc_index")
             .and_then(Value::as_u64)
+            .filter(|&n| n > 0)
             .map(|n| n as usize);
         let extra_path = args
             .get("pdf_path")
@@ -409,6 +410,7 @@ impl HostTool for AnydocSaveToSourcesTool {
         let requested_idx = args
             .get("doc_index")
             .and_then(Value::as_u64)
+            .filter(|&n| n > 0)
             .map(|n| n as usize);
         let requested_stem = args.get("file_stem").and_then(Value::as_str);
         let raw_topic = args

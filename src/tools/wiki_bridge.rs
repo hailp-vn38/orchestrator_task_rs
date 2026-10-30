@@ -418,8 +418,13 @@ impl HostTool for AddToSourcesTool {
         // Nhánh 2: Lưu tài liệu PDF/Office (`pdf_doc_index` / `doc_index` / `pdf_path`)
         let pdf_idx = args
             .get("pdf_doc_index")
-            .or_else(|| args.get("doc_index"))
             .and_then(Value::as_u64)
+            .filter(|&n| n > 0)
+            .or_else(|| {
+                args.get("doc_index")
+                    .and_then(Value::as_u64)
+                    .filter(|&n| n > 0)
+            })
             .map(|n| n as usize);
         let pdf_path = args
             .get("pdf_path")
@@ -427,7 +432,11 @@ impl HostTool for AddToSourcesTool {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
-        if pdf_idx.is_some() || pdf_path.is_some() {
+        let has_markdown_body = args
+            .get("markdown_body")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        if (pdf_idx.is_some() || pdf_path.is_some()) && !has_markdown_body {
             let pdf_state = self.pdf_state.as_ref().ok_or_else(|| {
                 host_tool_err(
                     "PDF_STATE_UNAVAILABLE",
@@ -464,13 +473,18 @@ impl HostTool for AddToSourcesTool {
         }
 
         // Nhánh 3: Lưu Markdown trực tiếp (`title` + `markdown_body`)
-        let title = custom_title
-            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing title"))?;
+        let title =
+            custom_title.ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing title"))?;
         let body = args
             .get("markdown_body")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Missing markdown_body (or provide video_id / pdf_doc_index / pdf_path)"))?;
+            .ok_or_else(|| {
+                host_tool_err(
+                    "INVALID_ARGUMENT",
+                    "Missing markdown_body (or provide video_id / pdf_doc_index / pdf_path)",
+                )
+            })?;
 
         let provenance =
             normalize_and_validate_provenance(args.get("provenance").and_then(Value::as_str))?;

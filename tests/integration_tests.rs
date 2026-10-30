@@ -2090,3 +2090,125 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
     task_mgr.shutdown().await.unwrap();
     orch.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn add_to_sources_stages_markdown_body_when_zero_pdf_doc_index_and_empty_optional_fields_are_passed(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = WorkspaceLayout::new(dir.path().join("workspace"));
+    layout.ensure_dirs().unwrap();
+
+    let prompt_path = layout.prompts_dir().join("agent.md");
+    std::fs::write(&prompt_path, "You are report_stager.").unwrap();
+
+    let engine = Arc::new(WikiEngine::open(layout.wiki_vault_dir()).unwrap());
+    engine.apply_template(WikiTemplateId::Research).unwrap();
+    let autoflow_notify = Arc::new(Notify::new());
+
+    let task_init = TaskManager::prepare(
+        TaskConfig::from_layout(&layout).with_default_agent("report_stager"),
+    )
+    .await
+    .unwrap();
+
+    let toolkit = WorkspaceToolKit::from_layout(&layout, engine.clone(), autoflow_notify.clone());
+
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "Staging transcript synthesis with all optional fields populated as zero/empty",
+        vec![(
+            "call_stage_breakaway_gap",
+            "add_to_sources",
+            json!({
+                "conflict_with": "",
+                "doc_index": 0,
+                "file_stem": "breakaway-gap-fvg-transcript-synthesis",
+                "markdown_body": "# Breakaway Gap/FVG: nhận diện trong bối cảnh dòng giá\n\n## Tóm tắt cốt lõi\nFVG không nên được đánh giá chỉ bằng hình dạng ba nến mà cần đặt trong bối cảnh mục tiêu kế tiếp.",
+                "open_questions": [
+                    "Cần đối chiếu video gốc để xác nhận thuật ngữ ASR như MMT, PD Array."
+                ],
+                "pdf_doc_index": 0,
+                "pdf_path": "",
+                "provenance": "source",
+                "tags": [
+                    "topic/trading/breakaway-gap-fvg",
+                    "technical-analysis",
+                    "market-structure",
+                    "fair-value-gap"
+                ],
+                "target_hint": "concepts/quantitative-finance/breakaway-gap-fvg",
+                "title": "Breakaway Gap/FVG — nhận diện theo bối cảnh và mục tiêu",
+                "topic_folder": "trading/breakaway-gap",
+                "video_id": ""
+            }),
+        )],
+    );
+    gw.push_text("Đã lưu bản tổng hợp vào sources/trading/breakaway-gap/breakaway-gap-fvg-transcript-synthesis.md.");
+
+    let stager_agent = AgentDefinition::new("report_stager", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Report stager")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["add_to_sources"])
+        .with_steps(4);
+
+    let mut builder = Orchestrator::builder(OrchestratorConfig::new(
+        test_llm_config(),
+        vec![stager_agent],
+        layout.orchestrator_store_dir(),
+    ))
+    .with_gateway(gw);
+
+    for tool in toolkit.all_host_tools(&task_init) {
+        builder = builder.register_tool(tool);
+    }
+    let orch = Arc::new(builder.build().await.unwrap());
+
+    let task_mgr = task_init
+        .with_orchestrator(orch.clone())
+        .start()
+        .await
+        .unwrap();
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    let task = task_mgr
+        .create_task(CreateTaskRequest::new(
+            "Stage Breakaway Gap Synthesis",
+            "Stage synthesized transcript into sources.",
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_terminal = false;
+    for _ in 0..80 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if t.id == task.id {
+                assert_eq!(t.status, TaskStatus::Completed);
+                saw_terminal = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_terminal, "task should complete");
+
+    let detail = task_mgr.get_task_detail(&task.id).await.unwrap();
+    let root = detail.root_agent.expect("root session");
+    assert_eq!(root.invocations.len(), 1);
+    assert_eq!(
+        root.invocations[0].status, "completed",
+        "expected add_to_sources to succeed, got error_code={:?}, summary={:?}",
+        root.invocations[0].error_code, detail.execution_summary
+    );
+    assert!(
+        layout
+            .wiki_vault_dir()
+            .join("sources/trading/breakaway-gap/breakaway-gap-fvg-transcript-synthesis.md")
+            .exists(),
+        "source file should be written to sources/trading/breakaway-gap/"
+    );
+
+    task_mgr.shutdown().await.unwrap();
+    orch.shutdown().await.unwrap();
+}
