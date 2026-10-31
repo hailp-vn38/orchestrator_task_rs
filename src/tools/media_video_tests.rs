@@ -800,3 +800,98 @@ async fn video_create_stops_waiting_for_the_provider_when_the_job_is_cancelled()
     }
     assert!(idle, "a cancelled job must not keep waiting on the provider");
 }
+
+/// Runs one `video_create` call (the recording backend always delivers a 5s clip) and returns the
+/// text the model receives as the tool result.
+async fn video_create_model_text(requested_secs: u32) -> String {
+    use orchestrator_agent_rs::test_support::ScriptedGateway;
+    use orchestrator_agent_rs::{
+        AgentDefinition, AgentMode, CallerContext, LlmBackend, LlmConfig, LlmProviderConfig,
+        Orchestrator, OrchestratorConfig, ProviderAuth, SecretString,
+    };
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let vid_tool = VideoCreateTool::new(Arc::new(RecordingVideoBackend {
+        seen_keys: Arc::new(Mutex::new(Vec::new())),
+    }))
+    .with_output_dir(dir.path().join("videos"))
+    .into_host_tool();
+
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "Generating",
+        vec![(
+            "call_vid",
+            "video_create",
+            json!({ "filename": "a.mp4", "prompt": "scene", "duration_secs": requested_secs }),
+        )],
+    );
+    gw.push_text("done");
+    let agent = AgentDefinition::new("media_agent", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Media creator")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["video_create"])
+        .with_steps(4);
+    let llm_cfg = LlmConfig {
+        providers: vec![LlmProviderConfig {
+            id: "test".to_string(),
+            backend: LlmBackend::OpenAiCompatible,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
+            request_timeout: Duration::from_secs(10),
+        }],
+    };
+    let orch = Orchestrator::builder(OrchestratorConfig::new(
+        llm_cfg,
+        vec![agent],
+        dir.path().join("orch_store"),
+    ))
+    .with_gateway(gw.clone())
+    .register_tool(vid_tool)
+    .build()
+    .await
+    .unwrap();
+    let caller = CallerContext::new("owner1", "ws1");
+    let session_id = orch.create_session(&caller, "media_agent").await.unwrap();
+    orch.submit(&caller, &session_id, "Make a video".to_string())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let snap = orch.snapshot(&caller, &session_id).await.unwrap();
+        let result = snap
+            .root
+            .invocations
+            .iter()
+            .find(|i| i.tool_name == "video_create")
+            .and_then(|inv| inv.result.as_ref());
+        if let Some(result) = result {
+            if !snap.has_active_work() {
+                return result["content"].as_str().unwrap_or_default().to_string();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("video_create did not settle");
+}
+
+#[tokio::test]
+async fn video_create_text_tells_the_agent_when_the_video_is_short() {
+    let text = video_create_model_text(30).await;
+    assert!(
+        text.contains("requested=30s actual=5s complete=false next_action=call_again_same_job"),
+        "short video must say so in the text the model reads: {text}"
+    );
+}
+
+#[tokio::test]
+async fn video_create_text_reports_a_full_length_video_as_complete() {
+    let text = video_create_model_text(5).await;
+    assert!(
+        text.contains("requested=5s actual=5s complete=true next_action=none"),
+        "{text}"
+    );
+}

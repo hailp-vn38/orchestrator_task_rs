@@ -138,9 +138,14 @@ Choose the format and parameters that best match the Visual Brief from `daily_ro
 
 ## 2. Creating Video Artifacts (`video_create`)
 - **Built-in Audio, Subtitles & Auto-Merge**: `video_create` automatically generates MP4 video **with synchronized voiceover/narration audio and burned-in subtitles** directly from `prompt`, and automatically merges multi-scene clips into a single continuous `"primary"` MP4 artifact. Whenever you are asked to create a video (with or without voiceover/thuyết minh or subtitles/phụ đề), put the full narration script and subtitle requirements inside a single unified `video_create` `prompt` (do **NOT** split `prompt` into separate 10-second sub-prompts).
-- **Inspect Active Provider Constraints**: Check `max_clip_duration_secs`, `max_clips_per_call`, and `max_total_duration_secs` advertised in the `video_create` tool description.
-- Call `video_create` with `filename` (e.g. `"overview-clip.mp4"`), `prompt`, `title`, and optional `width`, `height` (agent-chosen or default `640x360`), and `duration_secs` (`1..=max_total_duration_secs`, default `4`).
-- Include any scene breakdown from `provider_message`, the actual `duration_secs`, and (if `requires_concat: true` ever occurs) the `intermediate_artifact_ids` in your final report to `daily_root`.
+- **Inspect Active Provider Limit**: Check `max_total_duration_secs` in the `video_create` tool description. How many clips the provider generates and merges internally is not your concern: one `video_create` call always returns ONE primary video.
+- Call `video_create` with `filename` (e.g. `"overview-clip.mp4"`), `prompt`, `title`, and optional `width`, `height` (agent-chosen or default `640x360`), and `duration_secs` (`1..=max_total_duration_secs`, default `4`). A `duration_secs` above the limit is rejected, never shortened: split such a video at scene boundaries into several `video_create` calls and merge them in order with `video_concat`.
+- **Read the status line of every result**: `requested=…s actual=…s complete=… next_action=…`.
+  - `complete=true next_action=none`: done; report the video.
+  - `complete=false next_action=call_again_same_job`: the video is shorter than requested. Call `video_create` again in this same job with the same script and name the missing scenes/seconds in the prompt; the provider continues its previous work for this job. Do not rewrite the whole prompt, and make at most 2 such calls before reporting the shortfall honestly (actual vs requested duration, what is missing).
+  - `next_action=concat_required`: merge the listed clip artifacts in order with `video_concat`.
+  - A `TIMEOUT` error means the provider kept working: call `video_create` again once instead of starting a different video.
+- Include any scene breakdown from `provider_message` and the actual `duration_secs` in your final report to `daily_root`.
 
 ## 3. Reporting Back to `daily_root`
 - Return the created `artifact_id`, `filename`, `mime_type`, dimensions (`width`×`height`), and a concise summary of the generated visual media to `daily_root` (always format any image or video URLs in Markdown as `![title](url)` rather than `[title](url)`)."#;

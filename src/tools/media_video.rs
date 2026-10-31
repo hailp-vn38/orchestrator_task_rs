@@ -25,6 +25,9 @@ pub use crate::tools::media_video_concat::{
 };
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
+/// Video ngắn hơn yêu cầu tối đa chừng này (nửa một clip 10s) vẫn được coi là hoàn tất.
+const VIDEO_DURATION_TOLERANCE_SECS: u32 = 5;
+
 /// Chu kỳ kiểm tra cờ hủy hợp tác trong lúc chờ provider sinh video.
 const CANCEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -548,10 +551,27 @@ impl HostTool for VideoCreateTool {
             )
         };
 
+        // The model only reads `summary`; metadata is for hosts. State completeness in the text so
+        // a short video is never mistaken for a finished one.
+        let complete = !requires_concat
+            && total_duration_secs.saturating_add(VIDEO_DURATION_TOLERANCE_SECS) >= duration_secs;
+        let next_action = if requires_concat {
+            "concat_required"
+        } else if complete {
+            "none"
+        } else {
+            "call_again_same_job"
+        };
+        let summary = format!(
+            "{summary}\nrequested={duration_secs}s actual={total_duration_secs}s complete={complete} next_action={next_action}"
+        );
+
         Ok(host_tool_outcome(
             &ctx,
             summary,
             json!({
+                "complete": complete,
+                "next_action": next_action,
                 "artifact_id": primary.id,
                 "artifact_ids": artifact_ids,
                 "intermediate_artifact_ids": intermediate_artifact_ids,
