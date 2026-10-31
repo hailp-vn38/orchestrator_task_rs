@@ -139,7 +139,7 @@ impl HomelabExampleApp {
                 backend: LlmBackend::OpenAiCompatible,
                 endpoint: Some(creds.base_url.clone()),
                 auth: ProviderAuth::ApiKey(SecretString::new(creds.api_key.clone())),
-                request_timeout: Duration::from_secs(240),
+                limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(240)),
             }],
         };
 

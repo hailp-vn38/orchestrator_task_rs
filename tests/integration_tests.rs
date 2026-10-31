@@ -27,7 +27,7 @@ pub(crate) fn test_llm_config() -> LlmConfig {
             backend: LlmBackend::OpenAiCompatible,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
-            request_timeout: Duration::from_secs(10),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
         }],
     }
 }

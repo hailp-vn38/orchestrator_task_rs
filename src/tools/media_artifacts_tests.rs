@@ -237,7 +237,7 @@ async fn image_create_and_video_create_tools_resolve_artifact_references_end_to_
             backend: LlmBackend::OpenAiCompatible,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
-            request_timeout: Duration::from_secs(10),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
         }],
     };
 

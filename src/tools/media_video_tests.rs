@@ -170,7 +170,7 @@ async fn video_create_auto_merges_multiple_clips_into_primary_mp4_and_video_conc
             backend: LlmBackend::OpenAiCompatible,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
-            request_timeout: Duration::from_secs(10),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
         }],
     };
 
@@ -409,7 +409,7 @@ async fn video_create_falls_back_to_requires_concat_when_concat_backend_fails() 
             backend: LlmBackend::OpenAiCompatible,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
-            request_timeout: Duration::from_secs(10),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
         }],
     };
 
@@ -560,7 +560,7 @@ async fn video_create_passes_the_job_root_session_id_as_continuation_key() {
             backend: LlmBackend::OpenAiCompatible,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
-            request_timeout: Duration::from_secs(10),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
         }],
     };
     let orch = Orchestrator::builder(OrchestratorConfig::new(
@@ -643,7 +643,7 @@ async fn video_create_rejects_duration_above_provider_limit_instead_of_clamping(
             backend: LlmBackend::OpenAiCompatible,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
-            request_timeout: Duration::from_secs(10),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
         }],
     };
     let orch = Orchestrator::builder(OrchestratorConfig::new(
@@ -756,7 +756,7 @@ async fn video_create_stops_waiting_for_the_provider_when_the_job_is_cancelled()
             backend: LlmBackend::OpenAiCompatible,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
-            request_timeout: Duration::from_secs(10),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
         }],
     };
     let orch = Orchestrator::builder(OrchestratorConfig::new(
@@ -842,7 +842,7 @@ async fn video_create_model_text(requested_secs: u32) -> String {
             backend: LlmBackend::OpenAiCompatible,
             endpoint: Some("http://127.0.0.1:9".to_string()),
             auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
-            request_timeout: Duration::from_secs(10),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
         }],
     };
     let orch = Orchestrator::builder(OrchestratorConfig::new(
