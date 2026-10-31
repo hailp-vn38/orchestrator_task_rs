@@ -690,3 +690,113 @@ async fn video_create_rejects_duration_above_provider_limit_instead_of_clamping(
         "error names the limit so the agent can split the video: {text}"
     );
 }
+
+struct HangingVideoBackend {
+    started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl VideoGeneratorBackend for HangingVideoBackend {
+    fn video_constraints(&self) -> VideoProviderConstraints {
+        VideoProviderConstraints::default()
+    }
+
+    async fn generate_video(
+        &self,
+        _req: &VideoGenerationRequest,
+    ) -> Result<GeneratedVideoPayload, String> {
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        std::future::pending::<()>().await;
+        unreachable!("the hanging backend never completes")
+    }
+}
+
+#[tokio::test]
+async fn video_create_stops_waiting_for_the_provider_when_the_job_is_cancelled() {
+    use orchestrator_agent_rs::test_support::ScriptedGateway;
+    use orchestrator_agent_rs::{
+        AgentDefinition, AgentMode, CallerContext, LlmBackend, LlmConfig, LlmProviderConfig,
+        Orchestrator, OrchestratorConfig, ProviderAuth, SecretString,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+
+    let started = Arc::new(AtomicBool::new(false));
+    let vid_tool = VideoCreateTool::new(Arc::new(HangingVideoBackend {
+        started: Arc::clone(&started),
+    }))
+    .with_output_dir(dir.path().join("videos"))
+    .into_host_tool();
+
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "Generating",
+        vec![(
+            "call_vid_hang",
+            "video_create",
+            json!({ "filename": "a.mp4", "prompt": "scene", "duration_secs": 5 }),
+        )],
+    );
+    gw.push_text("done");
+
+    let agent = AgentDefinition::new("media_agent", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Media creator")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["video_create"])
+        .with_steps(4);
+    let llm_cfg = LlmConfig {
+        providers: vec![LlmProviderConfig {
+            id: "test".to_string(),
+            backend: LlmBackend::OpenAiCompatible,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
+            request_timeout: Duration::from_secs(10),
+        }],
+    };
+    let orch = Orchestrator::builder(OrchestratorConfig::new(
+        llm_cfg,
+        vec![agent],
+        dir.path().join("orch_store"),
+    ))
+    .with_gateway(gw.clone())
+    .register_tool(vid_tool)
+    .build()
+    .await
+    .unwrap();
+
+    let caller = CallerContext::new("owner1", "ws1");
+    let session_id = orch.create_session(&caller, "media_agent").await.unwrap();
+    orch.submit(&caller, &session_id, "Make a video".to_string())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if started.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(started.load(Ordering::SeqCst), "provider call started");
+
+    orch.cancel(&caller, &session_id).await.unwrap();
+
+    let mut idle = false;
+    for _ in 0..150 {
+        if !orch
+            .snapshot(&caller, &session_id)
+            .await
+            .unwrap()
+            .has_active_work()
+        {
+            idle = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(idle, "a cancelled job must not keep waiting on the provider");
+}

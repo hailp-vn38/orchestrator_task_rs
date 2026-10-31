@@ -25,6 +25,9 @@ pub use crate::tools::media_video_concat::{
 };
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
+/// Chu kỳ kiểm tra cờ hủy hợp tác trong lúc chờ provider sinh video.
+const CANCEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Yêu cầu sinh video gửi tới [`VideoGeneratorBackend`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoGenerationRequest {
@@ -371,11 +374,25 @@ impl HostTool for VideoCreateTool {
         req.width = width;
         req.height = height;
 
-        let mut generated = self
-            .backend
-            .generate_video(&req)
-            .await
-            .map_err(|e| host_tool_err("VIDEO_GENERATION_FAILED", e))?;
+        // Cancellation is cooperative: stop waiting for the provider as soon as the job is
+        // cancelled instead of holding the run until the provider (or the tool timeout) gives up.
+        let generation = self.backend.generate_video(&req);
+        let cancelled = async {
+            while !ctx.is_cancelled() {
+                tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+            }
+        };
+        let mut generated = tokio::select! {
+            result = generation => {
+                result.map_err(|e| host_tool_err("VIDEO_GENERATION_FAILED", e))?
+            }
+            () = cancelled => {
+                return Err(host_tool_err(
+                    "CANCELLED",
+                    "video generation was cancelled before the provider finished",
+                ));
+            }
+        };
 
         let clips = generated.take_effective_clips();
         let is_multi_clip = clips.len() > 1;
