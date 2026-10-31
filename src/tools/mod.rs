@@ -12,6 +12,8 @@ use crate::error::TaskResult;
 use crate::runtime::SharedTaskCore;
 use crate::types::{AgentCatalogEntry, TaskScope};
 
+pub mod add_to_sources;
+pub(crate) mod asr_audio_io;
 pub mod asr_transcribe;
 pub(crate) mod catalog;
 pub(crate) mod host_adapter;
@@ -23,9 +25,12 @@ pub mod media_tts;
 pub mod media_video;
 pub mod media_video_concat;
 pub mod pdf;
+pub(crate) mod pdf_convert;
 pub mod toolkit;
 pub(crate) mod voice_handler;
 pub mod web;
+pub(crate) mod web_html_extract;
+pub(crate) mod web_html_parser;
 pub mod wiki_bridge;
 pub mod youtube;
 

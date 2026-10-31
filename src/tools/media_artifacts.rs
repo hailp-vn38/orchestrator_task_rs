@@ -49,11 +49,11 @@ pub use crate::tools::media_image::{
     DefaultImageGeneratorBackend, GeneratedImagePayload, ImageCreateTool, ImageGenerationRequest,
     ImageGeneratorBackend, ReferenceImageInput,
 };
+pub(crate) use crate::tools::media_tts::synthesize_pcm_wav;
 pub use crate::tools::media_tts::{
     DefaultTtsSynthesizerBackend, SynthesizedAudioPayload, TtsProviderConstraints,
     TtsSynthesisRequest, TtsSynthesizeTool, TtsSynthesizerBackend,
 };
-pub(crate) use crate::tools::media_tts::synthesize_pcm_wav;
 pub use crate::tools::media_video::{
     normalize_video_stem, ConcatenatedVideoPayload, DefaultVideoConcatBackend,
     DefaultVideoGeneratorBackend, GeneratedVideoClip, GeneratedVideoPayload, VideoConcatBackend,

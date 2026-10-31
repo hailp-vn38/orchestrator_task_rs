@@ -20,6 +20,7 @@ pub(crate) mod autoflow;
 pub(crate) mod dispatch_core;
 pub(crate) mod event_bus;
 pub(crate) mod flow_registry;
+pub(crate) mod inspect_core;
 pub(crate) mod scheduler;
 pub(crate) mod watcher;
 

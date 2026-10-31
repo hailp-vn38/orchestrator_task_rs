@@ -6,12 +6,133 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::runtime::{compute_next_cron_ms, SharedTaskCore};
-use crate::store::now_ms;
+use crate::error::{TaskError, TaskResult};
+use crate::runtime::{compute_next_cron_ms, parse_due_at_ms, SharedTaskCore};
+use crate::store::{new_id, now_ms, NewScheduleRow};
 use crate::types::{
-    CreateTaskRequest, ScheduleActionKind, ScheduleKind, ScheduleSessionMode, ScheduleStatus,
-    ScheduleView, TaskEvent, TaskScope, TaskSource,
+    CreateScheduleRequest, CreateTaskRequest, ScheduleActionKind, ScheduleKind,
+    ScheduleSessionMode, ScheduleStatus, ScheduleView, TaskEvent, TaskScope, TaskSource,
 };
+
+impl SharedTaskCore {
+    /// Tạo Schedule hoặc Reminder mới trong `task_schedules` và đánh thức `Scheduler`.
+    pub(crate) async fn create_schedule_internal(
+        self: &Arc<Self>,
+        scope: &TaskScope,
+        req: CreateScheduleRequest,
+    ) -> TaskResult<ScheduleView> {
+        self.ensure_open()?;
+        scope.validate()?;
+
+        let title = req.title.trim();
+        if title.is_empty() {
+            return Err(TaskError::invalid_input(
+                "schedule/reminder title must not be empty",
+            ));
+        }
+
+        let tz_name = req
+            .timezone
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.config.default_timezone)
+            .to_string();
+
+        let (flow_id, agent_id) = match req.action_kind {
+            ScheduleActionKind::SpawnTask => {
+                if let Some(flows) = self.flows.get() {
+                    let (target, _) = flows.resolve_target(req.target_agent.as_deref())?;
+                    (Some(target.flow_id), Some(target.agent_id))
+                } else {
+                    let target = req
+                        .target_agent
+                        .as_deref()
+                        .and_then(|s| s.split_once('/'))
+                        .map(|(f, a)| (Some(f.to_string()), Some(a.to_string())))
+                        .or_else(|| {
+                            self.config
+                                .default_target
+                                .as_ref()
+                                .map(|t| (Some(t.flow_id.clone()), Some(t.agent_id.clone())))
+                        })
+                        .unwrap_or((
+                            Some("daily".to_string()),
+                            req.target_agent
+                                .clone()
+                                .or_else(|| Some("daily_root".to_string())),
+                        ));
+                    target
+                }
+            }
+            ScheduleActionKind::NotifyOnly => (None, None),
+        };
+
+        let now = now_ms();
+        let (schedule_kind, due_at, cron_expr, next_run_at, status) = if let Some(cron_raw) =
+            req.cron_expr.as_deref().filter(|s| !s.trim().is_empty())
+        {
+            let (clean_cron, next_ms) = compute_next_cron_ms(cron_raw, &tz_name, now)?;
+            (
+                ScheduleKind::Cron,
+                None,
+                Some(clean_cron),
+                Some(next_ms),
+                ScheduleStatus::Active,
+            )
+        } else if let Some(delay_secs) = req.delay_seconds {
+            let due = now.saturating_add(i64::try_from(delay_secs).unwrap_or(0) * 1000);
+            (
+                ScheduleKind::Once,
+                Some(due),
+                None,
+                Some(due),
+                ScheduleStatus::Pending,
+            )
+        } else if let Some(due_iso) = req.due_at_iso.as_deref().filter(|s| !s.trim().is_empty()) {
+            let due = parse_due_at_ms(due_iso, &tz_name)?;
+            (
+                ScheduleKind::Once,
+                Some(due),
+                None,
+                Some(due),
+                ScheduleStatus::Pending,
+            )
+        } else {
+            return Err(TaskError::invalid_input(
+                "schedule requires one of: due_at_iso, delay_seconds, or cron_expr",
+            ));
+        };
+
+        let created = self
+            .store
+            .insert_schedule(NewScheduleRow {
+                id: new_id(),
+                scope: scope.clone(),
+                title: title.to_string(),
+                notes: req
+                    .notes
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                action_kind: req.action_kind,
+                flow_id,
+                agent_id,
+                session_mode: req.session_mode,
+                priority: req.priority,
+                related_wiki_links: req.related_wiki_links,
+                schedule_kind,
+                due_at,
+                cron_expr,
+                timezone: tz_name,
+                status,
+                next_run_at,
+            })
+            .await?;
+
+        self.scheduler_wake.notify_one();
+        Ok(created)
+    }
+}
 
 pub(crate) fn spawn_scheduler_loop(core: Arc<SharedTaskCore>) -> JoinHandle<()> {
     tokio::spawn(async move {

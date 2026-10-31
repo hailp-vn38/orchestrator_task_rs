@@ -12,9 +12,7 @@ use orchestrator_agent_rs::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::tools::media_artifacts::{
-    mirror_artifact_to_dir, parse_role, TTS_SYNTHESIZE_TIMEOUT,
-};
+use crate::tools::media_artifacts::{mirror_artifact_to_dir, parse_role, TTS_SYNTHESIZE_TIMEOUT};
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
 /// Thông tin giọng đọc và giới hạn theo provider hiện hành của công cụ `tts_synthesize`.
@@ -363,3 +361,7 @@ pub(crate) fn synthesize_pcm_wav(text: &str, sample_rate: u32, duration_ms: u64)
 
     wav
 }
+
+#[cfg(test)]
+#[path = "media_tts_tests.rs"]
+mod tests;
