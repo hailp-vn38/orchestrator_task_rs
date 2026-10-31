@@ -88,7 +88,7 @@ fn video_create_descriptor_reflects_dynamic_provider_constraints() {
         .is_some());
     assert!(d1.input_schema["properties"].get("role").is_some());
     assert_eq!(d1.input_schema["additionalProperties"], false);
-    assert_eq!(d1.effect, ToolEffect::Mutating);
+    assert_eq!(d1.effect, ToolEffect::Resumable);
 
     // Switch active provider constraints dynamically
     *backend.constraints.lock().unwrap() = VideoProviderConstraints {
@@ -1108,4 +1108,691 @@ async fn video_timeout_code() {
         "video_create must propagate VIDEO_GENERATION_TIMEOUT in ToolError: {text}"
     );
     orch.shutdown().await.unwrap();
+}
+
+struct DurablePhase4Backend {
+    submit_calls: Arc< std::sync::atomic::AtomicUsize>,
+    resume_calls: Arc<std::sync::atomic::AtomicUsize>,
+    download_calls: Arc<std::sync::atomic::AtomicUsize>,
+    reconcile_mode: SubmittingReconciliation,
+    seen_resume_batch_index: Arc<Mutex<Vec<u32>>>,
+    seen_resume_batch_paths: Arc<Mutex<Vec<Option<String>>>>,
+    seen_submit_remote_session_ids: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl DurablePhase4Backend {
+    fn new(reconcile_mode: SubmittingReconciliation) -> Self {
+        Self {
+            submit_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            resume_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            download_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            reconcile_mode,
+            seen_resume_batch_index: Arc::new(Mutex::new(Vec::new())),
+            seen_resume_batch_paths: Arc::new(Mutex::new(Vec::new())),
+            seen_submit_remote_session_ids: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn make_payload(req: &VideoGenerationRequest, dur: u32) -> GeneratedVideoPayload {
+        let (width, height) = req.effective_dimensions();
+        let bytes = encode_minimal_mp4(&req.prompt, width, height, dur);
+        GeneratedVideoPayload {
+            filename: req.filename.clone(),
+            mime_type: "video/mp4".to_string(),
+            bytes: bytes.clone(),
+            width,
+            height,
+            duration_secs: dur,
+            provider: "muse".to_string(),
+            clips: vec![GeneratedVideoClip {
+                filename: req.filename.clone(),
+                mime_type: "video/mp4".to_string(),
+                bytes,
+                width,
+                height,
+                duration_secs: dur,
+            }],
+            provider_message: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl VideoGeneratorBackend for DurablePhase4Backend {
+    async fn generate_video(
+        &self,
+        req: &VideoGenerationRequest,
+        ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+        self.submit_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.seen_submit_remote_session_ids
+            .lock()
+            .unwrap()
+            .push(ctx.operation.as_ref().and_then(|op| op.remote_session_id.clone()));
+        Ok(Self::make_payload(req, req.duration_secs.max(5)))
+    }
+
+    async fn reconcile_submitting(
+        &self,
+        _req: &VideoGenerationRequest,
+        _op: &orchestrator_agent_rs::ToolOperation,
+        _ctx: &MediaCallContext,
+    ) -> SubmittingReconciliation {
+        self.reconcile_mode
+    }
+
+    async fn resume_video(
+        &self,
+        req: &VideoGenerationRequest,
+        op: &orchestrator_agent_rs::ToolOperation,
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+        self.resume_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.seen_resume_batch_index
+            .lock()
+            .unwrap()
+            .push(op.batch_index);
+        self.seen_resume_batch_paths
+            .lock()
+            .unwrap()
+            .push(op.batch_paths_json.clone());
+        Ok(Self::make_payload(req, req.duration_secs.max(5)))
+    }
+
+    async fn download_video(
+        &self,
+        req: &VideoGenerationRequest,
+        _op: &orchestrator_agent_rs::ToolOperation,
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+        self.download_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Self::make_payload(req, req.duration_secs.max(5)))
+    }
+}
+
+async fn seed_crashed_video_invocation(
+    store_dir: &std::path::Path,
+    prompt_path: &std::path::Path,
+    vid_tool: Arc<dyn HostTool>,
+    op_status: &str,
+    user_turns_before: Option<i64>,
+    remote_session_id: Option<&str>,
+    batch_index: i64,
+    batch_paths_json: Option<&str>,
+    result_json: Option<&str>,
+) -> String {
+    use orchestrator_agent_rs::test_support::ScriptedGateway;
+    use orchestrator_agent_rs::{
+        AgentDefinition, AgentMode, CallerContext, LlmBackend, LlmConfig, LlmProviderConfig,
+        Orchestrator, OrchestratorConfig, ProviderAuth, SecretString,
+    };
+    use sqlx::{Connection, SqliteConnection};
+    use std::time::Duration;
+
+    let gw = ScriptedGateway::new();
+    let agent = AgentDefinition::new("media_agent", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Media creator")
+        .with_prompt_path(prompt_path)
+        .with_allowed_tools(["video_create"])
+        .with_steps(4);
+    let llm_cfg = LlmConfig {
+        providers: vec![LlmProviderConfig {
+            id: "test".to_string(),
+            backend: LlmBackend::OpenAiCompatible,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
+        }],
+    };
+    let orch = Orchestrator::builder(OrchestratorConfig::new(llm_cfg, vec![agent], store_dir))
+        .with_gateway(gw.clone())
+        .register_tool(vid_tool)
+        .build()
+        .await
+        .unwrap();
+    let caller = CallerContext::new("owner1", "ws1");
+    let session_id = orch.create_session(&caller, "media_agent").await.unwrap();
+    gw.push_text("bootstrap");
+    let boot = orch
+        .submit(&caller, &session_id, "bootstrap".to_string())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let r = orch
+            .result(&caller, &session_id, &boot.turn_id)
+            .await
+            .unwrap();
+        if r.status.is_terminal() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    orch.shutdown().await.unwrap();
+
+    let db_path = store_dir.join("orchestrator.db");
+    let mut conn = SqliteConnection::connect(&format!("sqlite://{}", db_path.display()))
+        .await
+        .unwrap();
+    let fp: String = sqlx::query_scalar(
+        "SELECT provider_config_fingerprint FROM agent_runs WHERE session_id = ?1 LIMIT 1",
+    )
+    .bind(&session_id)
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE agent_runs SET final_message_id = NULL WHERE session_id = ?1")
+        .bind(&session_id)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM messages WHERE session_id = ?1")
+        .bind(&session_id)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM llm_attempts WHERE run_id IN (SELECT id FROM agent_runs WHERE session_id = ?1)",
+    )
+    .bind(&session_id)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM agent_runs WHERE session_id = ?1")
+        .bind(&session_id)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO messages(id, session_id, sequence, role, content_json) \
+         VALUES('msg-u1', ?1, 1, 'user', '{\"text\":\"make video\"}')",
+    )
+    .bind(&session_id)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agent_runs(id, session_id, agent_id, turn_id, resume_attempt, \
+         provider_id, model_id, provider_config_fingerprint, status, steps) \
+         VALUES('run-crash-0', ?1, 'media_agent', 'turn-crash', 0, 'test', 'gpt-test', ?2, 'running', 1)",
+    )
+    .bind(&session_id)
+    .bind(&fp)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    let args_json = json!({
+        "filename": "durable.mp4",
+        "prompt": "durable test scene",
+        "duration_secs": 10
+    })
+    .to_string();
+    let msg_a_json = json!({
+        "text": "",
+        "tool_calls": [{
+            "id": "call-vid-1",
+            "name": "video_create",
+            "arguments": {
+                "filename": "durable.mp4",
+                "prompt": "durable test scene",
+                "duration_secs": 10
+            }
+        }]
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO messages(id, session_id, sequence, role, content_json, run_id) \
+         VALUES('msg-a1', ?1, 2, 'assistant', ?2, 'run-crash-0')",
+    )
+    .bind(&session_id)
+    .bind(&msg_a_json)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tool_invocations(id, session_id, run_id, tool_call_id, assistant_message_id, \
+         tool_name, arguments_json, status, started_at) \
+         VALUES('inv-vid-1', ?1, 'run-crash-0', 'call-vid-1', 'msg-a1', 'video_create', ?2, 'running', unixepoch())",
+    )
+    .bind(&session_id)
+    .bind(&args_json)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE sessions SET next_sequence = 3 WHERE id = ?1")
+        .bind(&session_id)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO tool_operations(id, invocation_id, provider_ref, remote_session_id, \
+         continuation_key, batch_index, batch_paths_json, user_turns_before, status, result_json, deadline_at) \
+         VALUES('op-vid-1', 'inv-vid-1', 'muse', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 9999999999)",
+    )
+    .bind(remote_session_id)
+    .bind(&session_id)
+    .bind(batch_index)
+    .bind(batch_paths_json)
+    .bind(user_turns_before)
+    .bind(op_status)
+    .bind(result_json)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+
+    session_id
+}
+
+async fn reopen_and_wait_turn(
+    store_dir: &std::path::Path,
+    prompt_path: &std::path::Path,
+    vid_tool: Arc<dyn HostTool>,
+    session_id: &str,
+) -> (
+    orchestrator_agent_rs::Orchestrator,
+    orchestrator_agent_rs::AgentResult,
+    Vec<orchestrator_agent_rs::ArtifactRef>,
+) {
+    use orchestrator_agent_rs::test_support::ScriptedGateway;
+    use orchestrator_agent_rs::{
+        AgentDefinition, AgentMode, CallerContext, LlmBackend, LlmConfig, LlmProviderConfig,
+        Orchestrator, OrchestratorConfig, PageRequest, ProviderAuth, RunStatus, SecretString,
+    };
+    use std::time::Duration;
+
+    let gw = ScriptedGateway::new();
+    gw.push_text("recovered and completed");
+    let agent = AgentDefinition::new("media_agent", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Media creator")
+        .with_prompt_path(prompt_path)
+        .with_allowed_tools(["video_create"])
+        .with_steps(4);
+    let llm_cfg = LlmConfig {
+        providers: vec![LlmProviderConfig {
+            id: "test".to_string(),
+            backend: LlmBackend::OpenAiCompatible,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
+        }],
+    };
+    let orch = Orchestrator::builder(OrchestratorConfig::new(llm_cfg, vec![agent], store_dir))
+        .with_gateway(gw)
+        .register_tool(vid_tool)
+        .build()
+        .await
+        .unwrap();
+    let caller = CallerContext::new("owner1", "ws1");
+    let mut final_res = None;
+    for _ in 0..100 {
+        let r = orch
+            .result(&caller, session_id, "turn-crash")
+            .await
+            .unwrap();
+        if r.status != RunStatus::Running {
+            final_res = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let res = final_res.expect("turn-crash settled");
+    let arts = orch
+        .list_artifacts(&caller, session_id, "turn-crash", PageRequest::first(20))
+        .await
+        .unwrap()
+        .items;
+    (orch, res, arts)
+}
+
+#[tokio::test]
+async fn kill_while_running() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let store_dir = dir.path().join("orch_store");
+
+    let backend = Arc::new(DurablePhase4Backend::new(
+        SubmittingReconciliation::Unreadable,
+    ));
+    let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+    let session_id = seed_crashed_video_invocation(
+        &store_dir,
+        &prompt_path,
+        vid_tool.clone(),
+        "running",
+        Some(0),
+        Some("sess-run-1"),
+        0,
+        None,
+        None,
+    )
+    .await;
+
+    let (orch, res, arts) =
+        reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+    assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Completed);
+    assert_eq!(
+        backend.submit_calls.load(Ordering::SeqCst),
+        0,
+        "must not submit a second time when op is already running"
+    );
+    assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(arts.len(), 1);
+    orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn kill_while_downloading() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let store_dir = dir.path().join("orch_store");
+
+    let backend = Arc::new(DurablePhase4Backend::new(
+        SubmittingReconciliation::Unreadable,
+    ));
+    let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+    let session_id = seed_crashed_video_invocation(
+        &store_dir,
+        &prompt_path,
+        vid_tool.clone(),
+        "downloading",
+        Some(0),
+        Some("sess-dl-1"),
+        0,
+        None,
+        None,
+    )
+    .await;
+
+    let (orch, res, arts) =
+        reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+    assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Completed);
+    assert_eq!(backend.submit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.download_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(arts.len(), 1, "must produce exactly one artifact");
+    orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn kill_while_submitting_sent() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let store_dir = dir.path().join("orch_store");
+
+    // Row 1: remote user turns (1) > user_turns_before (0) -> transitions to running and polls
+    let backend = Arc::new(DurablePhase4Backend::new(
+        SubmittingReconciliation::RemoteUserTurns(1),
+    ));
+    let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+    let session_id = seed_crashed_video_invocation(
+        &store_dir,
+        &prompt_path,
+        vid_tool.clone(),
+        "submitting",
+        Some(0),
+        Some("sess-sub-sent"),
+        0,
+        None,
+        None,
+    )
+    .await;
+
+    let (orch, res, arts) =
+        reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+    assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Completed);
+    assert_eq!(
+        backend.submit_calls.load(Ordering::SeqCst),
+        0,
+        "already sent turn must transition to running without re-submitting"
+    );
+    assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(arts.len(), 1);
+    orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn kill_while_submitting_not_sent() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let store_dir = dir.path().join("orch_store");
+
+    // Row 2: remote user turns (0) == user_turns_before (0) -> re-submit with the same session
+    let backend = Arc::new(DurablePhase4Backend::new(
+        SubmittingReconciliation::RemoteUserTurns(0),
+    ));
+    let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+    let session_id = seed_crashed_video_invocation(
+        &store_dir,
+        &prompt_path,
+        vid_tool.clone(),
+        "submitting",
+        Some(0),
+        Some("sess-sub-unsent"),
+        0,
+        None,
+        None,
+    )
+    .await;
+
+    let (orch, res, arts) =
+        reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+    assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Completed);
+    assert_eq!(backend.submit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        backend.seen_submit_remote_session_ids.lock().unwrap().as_slice(),
+        &[Some("sess-sub-unsent".to_string())]
+    );
+    assert_eq!(arts.len(), 1);
+    orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn kill_while_submitting_unreadable() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let store_dir = dir.path().join("orch_store");
+
+    // Row 3: unreadable history -> returns TOOL_OUTCOME_UNKNOWN -> run stays Interrupted
+    let backend = Arc::new(DurablePhase4Backend::new(
+        SubmittingReconciliation::Unreadable,
+    ));
+    let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+    let session_id = seed_crashed_video_invocation(
+        &store_dir,
+        &prompt_path,
+        vid_tool.clone(),
+        "submitting",
+        Some(0),
+        Some("sess-sub-unreadable"),
+        0,
+        None,
+        None,
+    )
+    .await;
+
+    let (orch, res, arts) =
+        reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+    assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Interrupted);
+    assert_eq!(
+        res.error.as_ref().map(|e| e.code.as_str()),
+        Some("TOOL_OUTCOME_UNKNOWN")
+    );
+    assert_eq!(backend.submit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 0);
+    assert!(arts.is_empty());
+    orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn kill_after_committed() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let store_dir = dir.path().join("orch_store");
+
+    let backend = Arc::new(DurablePhase4Backend::new(
+        SubmittingReconciliation::Unreadable,
+    ));
+    let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+
+    // First run a normal turn to get a real committed artifact in the store, or seed it:
+    let saved_result = json!({
+        "content": "Created video artifact 'durable.mp4'\nrequested=10s actual=10s complete=true next_action=none",
+        "metadata": {
+            "complete": true,
+            "next_action": "none",
+            "artifact_kind": "video"
+        }
+    })
+    .to_string();
+    let session_id = seed_crashed_video_invocation(
+        &store_dir,
+        &prompt_path,
+        vid_tool.clone(),
+        "committed",
+        Some(0),
+        Some("sess-committed"),
+        0,
+        None,
+        Some(&saved_result),
+    )
+    .await;
+
+    let (orch, res, arts) =
+        reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+    assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Completed);
+    assert_eq!(backend.submit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.download_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        arts.is_empty(),
+        "must not re-download or create duplicate artifacts after committed"
+    );
+    orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn kill_between_batches() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let store_dir = dir.path().join("orch_store");
+
+    let backend = Arc::new(DurablePhase4Backend::new(
+        SubmittingReconciliation::Unreadable,
+    ));
+    let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+    let batch_paths = json!(["/tmp/muse-batch-0.mp4"]).to_string();
+    let session_id = seed_crashed_video_invocation(
+        &store_dir,
+        &prompt_path,
+        vid_tool.clone(),
+        "running",
+        Some(0),
+        Some("sess-batches"),
+        1,
+        Some(&batch_paths),
+        None,
+    )
+    .await;
+
+    let (orch, res, arts) =
+        reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+    assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Completed);
+    assert_eq!(backend.submit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*backend.seen_resume_batch_index.lock().unwrap(), vec![1]);
+    assert_eq!(
+        *backend.seen_resume_batch_paths.lock().unwrap(),
+        vec![Some(batch_paths)]
+    );
+    assert_eq!(arts.len(), 1);
+    orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_with_prior_turns() {
+    use std::sync::atomic::Ordering;
+    // Session already had 2 prior user turns (`user_turns_before = Some(2)`).
+    // 1) When history still has 2 user turns -> not sent -> re-submits with same session.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+        let store_dir = dir.path().join("orch_store");
+
+        let backend = Arc::new(DurablePhase4Backend::new(
+            SubmittingReconciliation::RemoteUserTurns(2),
+        ));
+        let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+        let session_id = seed_crashed_video_invocation(
+            &store_dir,
+            &prompt_path,
+            vid_tool.clone(),
+            "submitting",
+            Some(2),
+            Some("sess-prior-2"),
+            0,
+            None,
+            None,
+        )
+        .await;
+
+        let (orch, res, _arts) =
+            reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+        assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Completed);
+        assert_eq!(backend.submit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 0);
+        orch.shutdown().await.unwrap();
+    }
+
+    // 2) When history has 3 user turns (> 2) -> sent -> transitions to running and resumes.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+        let store_dir = dir.path().join("orch_store");
+
+        let backend = Arc::new(DurablePhase4Backend::new(
+            SubmittingReconciliation::RemoteUserTurns(3),
+        ));
+        let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+        let session_id = seed_crashed_video_invocation(
+            &store_dir,
+            &prompt_path,
+            vid_tool.clone(),
+            "submitting",
+            Some(2),
+            Some("sess-prior-3"),
+            0,
+            None,
+            None,
+        )
+        .await;
+
+        let (orch, res, _arts) =
+            reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+        assert_eq!(res.status, orchestrator_agent_rs::RunStatus::Completed);
+        assert_eq!(backend.submit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 1);
+        orch.shutdown().await.unwrap();
+    }
 }

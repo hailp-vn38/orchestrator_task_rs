@@ -367,6 +367,7 @@ impl HostTool for ImageCreateTool {
 
         let call_ctx = MediaCallContext {
             cancel: ctx.cancel_signal().clone(),
+            ..Default::default()
         };
         let generated = tokio::select! {
             result = self.backend.generate_image(&req, &call_ctx) => {

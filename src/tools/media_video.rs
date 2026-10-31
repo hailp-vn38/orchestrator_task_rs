@@ -28,11 +28,51 @@ use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 /// Video ngắn hơn yêu cầu tối đa chừng này (nửa một clip 10s) vẫn được coi là hoàn tất.
 const VIDEO_DURATION_TOLERANCE_SECS: u32 = 5;
 
+/// Giao diện ghi nhật ký tiến trình bền vững vào bảng `tool_operations` của `Orchestrator`.
+#[async_trait::async_trait]
+pub trait VideoOperationJournal: Send + Sync {
+    async fn advance(
+        &self,
+        update: orchestrator_agent_rs::OperationUpdate,
+    ) -> Result<(), orchestrator_agent_rs::ToolError>;
+}
+
+#[async_trait::async_trait]
+impl VideoOperationJournal for ToolContext {
+    async fn advance(
+        &self,
+        update: orchestrator_agent_rs::OperationUpdate,
+    ) -> Result<(), orchestrator_agent_rs::ToolError> {
+        self.operation().advance(update).await
+    }
+}
+
+/// Kết quả đối soát một bản ghi `tool_operations` đang ở trạng thái `submitting`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmittingReconciliation {
+    /// Đọc được `/chat/history` của `remote_session_id`: trả tổng số `message.user` hiện có.
+    RemoteUserTurns(u32),
+    /// Không đọc được history hoặc provider không hỗ trợ đối soát.
+    Unreadable,
+}
+
 /// Ngữ cảnh điều phối truyền xuống các backend media (`image_create`, `video_create`),
-/// bao gồm tín hiệu hủy hợp tác / shutdown.
-#[derive(Debug, Clone, Default)]
+/// bao gồm tín hiệu hủy hợp tác / shutdown và trạng thái `tool_operations` bền vững.
+#[derive(Clone, Default)]
 pub struct MediaCallContext {
     pub cancel: orchestrator_agent_rs::CancelSignal,
+    pub operation: Option<orchestrator_agent_rs::ToolOperation>,
+    pub journal: Option<Arc<dyn VideoOperationJournal>>,
+}
+
+impl std::fmt::Debug for MediaCallContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaCallContext")
+            .field("cancel", &self.cancel)
+            .field("operation", &self.operation)
+            .field("has_journal", &self.journal.is_some())
+            .finish()
+    }
 }
 
 /// Lỗi có cấu trúc từ [`VideoGeneratorBackend`] để giữ nguyên mã lỗi gốc (`VIDEO_GENERATION_TIMEOUT`,
@@ -210,6 +250,40 @@ pub trait VideoGeneratorBackend: Send + Sync {
         req: &VideoGenerationRequest,
         ctx: &MediaCallContext,
     ) -> Result<GeneratedVideoPayload, MediaBackendError>;
+
+    /// Đối soát trạng thái `submitting` sau khi tiến trình khởi động lại.
+    async fn reconcile_submitting(
+        &self,
+        _req: &VideoGenerationRequest,
+        _op: &orchestrator_agent_rs::ToolOperation,
+        _ctx: &MediaCallContext,
+    ) -> SubmittingReconciliation {
+        SubmittingReconciliation::Unreadable
+    }
+
+    /// Tiếp tục theo dõi/chạy lô tiếp theo của một operation đã sang `running`.
+    async fn resume_video(
+        &self,
+        _req: &VideoGenerationRequest,
+        _op: &orchestrator_agent_rs::ToolOperation,
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+        Err(MediaBackendError::new(
+            "TOOL_OUTCOME_UNKNOWN",
+            "video provider does not support resuming an in-flight operation",
+            false,
+        ))
+    }
+
+    /// Tải lại các tệp video khi operation đã sang `downloading` trước lúc crash.
+    async fn download_video(
+        &self,
+        req: &VideoGenerationRequest,
+        op: &orchestrator_agent_rs::ToolOperation,
+        ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+        self.resume_video(req, op, ctx).await
+    }
 }
 
 /// Backend tạo video mặc định tự chủ: kết xuất container ISO BMFF / MP4 (`video/mp4`) hợp lệ
@@ -351,7 +425,7 @@ impl HostTool for VideoCreateTool {
                 },
                 "additionalProperties": false
             }),
-            effect: ToolEffect::Mutating,
+            effect: ToolEffect::Resumable,
         }
     }
 
@@ -421,14 +495,208 @@ impl HostTool for VideoCreateTool {
 
         // Cancellation is cooperative: stop waiting for the provider as soon as the job is
         // cancelled instead of holding the run until the provider (or the tool timeout) gives up.
+        let request_json_str = json!({
+            "prompt": req.prompt,
+            "duration_secs": req.duration_secs,
+            "filename": req.filename,
+            "width": req.width,
+            "height": req.height,
+        })
+        .to_string();
+
+        let (has_op_store, existing_op) = match ctx.operation().current().await {
+            Ok(op) => (true, op),
+            Err(e) if e.code == "ARTIFACT_UNAVAILABLE" => (false, None),
+            Err(e) => return Err(e),
+        };
+
+        enum DispatchAction {
+            Submit(Option<orchestrator_agent_rs::ToolOperation>),
+            Resume(orchestrator_agent_rs::ToolOperation),
+            Download(orchestrator_agent_rs::ToolOperation),
+        }
+
+        let action = if !has_op_store {
+            DispatchAction::Submit(None)
+        } else {
+            match existing_op {
+                None => {
+                    let deadline_at = ctx.operation().now_secs().saturating_add(900);
+                    let mut op = ctx
+                        .operation()
+                        .begin(deadline_at, &constraints.provider_label)
+                        .await?;
+                    ctx.operation()
+                        .advance(orchestrator_agent_rs::OperationUpdate {
+                            request_json: Some(request_json_str.clone()),
+                            ..Default::default()
+                        })
+                        .await?;
+                    op.request_json = Some(request_json_str);
+                    DispatchAction::Submit(Some(op))
+                }
+                Some(op) => match op.status {
+                    orchestrator_agent_rs::ToolOperationStatus::Committed => {
+                        let saved: Value = op
+                            .result_json
+                            .as_deref()
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or_else(|| json!({}));
+                        let content = saved
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Created video artifact")
+                            .to_string();
+                        let metadata = saved.get("metadata").cloned().unwrap_or(Value::Null);
+                        return Ok(host_tool_outcome(&ctx, content, metadata));
+                    }
+                    orchestrator_agent_rs::ToolOperationStatus::Failed
+                    | orchestrator_agent_rs::ToolOperationStatus::Expired
+                    | orchestrator_agent_rs::ToolOperationStatus::Cancelled => {
+                        let saved: Value = op
+                            .result_json
+                            .as_deref()
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or_else(|| json!({}));
+                        let default_code = match op.status {
+                            orchestrator_agent_rs::ToolOperationStatus::Cancelled => "CANCELLED",
+                            orchestrator_agent_rs::ToolOperationStatus::Expired => {
+                                "VIDEO_GENERATION_TIMEOUT"
+                            }
+                            _ => "VIDEO_GENERATION_FAILED",
+                        };
+                        let code = saved
+                            .get("code")
+                            .and_then(Value::as_str)
+                            .unwrap_or(default_code);
+                        let message = saved
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("video operation did not complete");
+                        return Err(host_tool_err(code, message));
+                    }
+                    orchestrator_agent_rs::ToolOperationStatus::Submitting => {
+                        let probe_ctx = MediaCallContext {
+                            cancel: ctx.cancel_signal().clone(),
+                            operation: Some(op.clone()),
+                            journal: Some(Arc::new(ctx.clone())),
+                        };
+                        let Some(before) = op.user_turns_before else {
+                            return Err(host_tool_err(
+                                "TOOL_OUTCOME_UNKNOWN",
+                                "in-flight video submission has no recorded user_turns_before",
+                            ));
+                        };
+                        match self
+                            .backend
+                            .reconcile_submitting(&req, &op, &probe_ctx)
+                            .await
+                        {
+                            SubmittingReconciliation::RemoteUserTurns(actual)
+                                if actual > before =>
+                            {
+                                let mut running_op = op;
+                                ctx.operation()
+                                    .advance(orchestrator_agent_rs::OperationUpdate {
+                                        status: Some(
+                                            orchestrator_agent_rs::ToolOperationStatus::Running,
+                                        ),
+                                        ..Default::default()
+                                    })
+                                    .await?;
+                                running_op.status =
+                                    orchestrator_agent_rs::ToolOperationStatus::Running;
+                                DispatchAction::Resume(running_op)
+                            }
+                            SubmittingReconciliation::RemoteUserTurns(actual)
+                                if actual == before =>
+                            {
+                                DispatchAction::Submit(Some(op))
+                            }
+                            _ => {
+                                return Err(host_tool_err(
+                                    "TOOL_OUTCOME_UNKNOWN",
+                                    "could not reconcile in-flight video submission after restart",
+                                ));
+                            }
+                        }
+                    }
+                    orchestrator_agent_rs::ToolOperationStatus::Running => {
+                        DispatchAction::Resume(op)
+                    }
+                    orchestrator_agent_rs::ToolOperationStatus::Downloading => {
+                        DispatchAction::Download(op)
+                    }
+                },
+            }
+        };
+
+        let op_for_ctx = match &action {
+            DispatchAction::Submit(op) => op.clone(),
+            DispatchAction::Resume(op) | DispatchAction::Download(op) => Some(op.clone()),
+        };
         let call_ctx = MediaCallContext {
             cancel: ctx.cancel_signal().clone(),
+            operation: op_for_ctx,
+            journal: has_op_store
+                .then(|| Arc::new(ctx.clone()) as Arc<dyn VideoOperationJournal>),
+        };
+        let backend_fut = async {
+            match &action {
+                DispatchAction::Submit(_) => self.backend.generate_video(&req, &call_ctx).await,
+                DispatchAction::Resume(op) => self.backend.resume_video(&req, op, &call_ctx).await,
+                DispatchAction::Download(op) => {
+                    self.backend.download_video(&req, op, &call_ctx).await
+                }
+            }
         };
         let mut generated = tokio::select! {
-            result = self.backend.generate_video(&req, &call_ctx) => {
-                result.map_err(|e| host_tool_err(&e.code, e.message))?
+            result = backend_fut => {
+                match result {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        if has_op_store && e.code != "TOOL_OUTCOME_UNKNOWN" {
+                            let status = if e.code == "VIDEO_GENERATION_TIMEOUT" {
+                                orchestrator_agent_rs::ToolOperationStatus::Expired
+                            } else if e.code == "CANCELLED" {
+                                orchestrator_agent_rs::ToolOperationStatus::Cancelled
+                            } else {
+                                orchestrator_agent_rs::ToolOperationStatus::Failed
+                            };
+                            let _ = ctx
+                                .operation()
+                                .advance(orchestrator_agent_rs::OperationUpdate {
+                                    status: Some(status),
+                                    result_json: Some(
+                                        json!({ "code": e.code, "message": e.message }).to_string(),
+                                    ),
+                                    ..Default::default()
+                                })
+                                .await;
+                        }
+                        return Err(host_tool_err(&e.code, e.message));
+                    }
+                }
             }
             () = ctx.cancel_token().cancelled() => {
+                if has_op_store
+                    && ctx.cancel_reason() != Some(orchestrator_agent_rs::CancelReason::Shutdown)
+                {
+                    let _ = ctx
+                        .operation()
+                        .advance(orchestrator_agent_rs::OperationUpdate {
+                            status: Some(orchestrator_agent_rs::ToolOperationStatus::Cancelled),
+                            result_json: Some(
+                                json!({
+                                    "code": "CANCELLED",
+                                    "message": "video generation was cancelled before the provider finished"
+                                })
+                                .to_string(),
+                            ),
+                            ..Default::default()
+                        })
+                        .await;
+                }
                 return Err(host_tool_err(
                     "CANCELLED",
                     "video generation was cancelled before the provider finished",
@@ -624,33 +892,56 @@ impl HostTool for VideoCreateTool {
             "{summary}\nrequested={duration_secs}s actual={total_duration_secs}s complete={complete_status} next_action={next_action}"
         );
 
-        Ok(host_tool_outcome(
-            &ctx,
-            summary,
-            json!({
-                "complete": if !requires_concat && !duration_measurable { json!("unknown") } else { json!(complete) },
-                "next_action": next_action,
-                "artifact_id": primary.id,
-                "artifact_ids": artifact_ids,
-                "intermediate_artifact_ids": intermediate_artifact_ids,
-                "artifact_kind": "video",
-                "filename": primary.name,
-                "mime_type": primary.mime_type,
-                "size_bytes": primary.size_bytes,
-                "sha256": primary.sha256,
-                "width": generated.width,
-                "height": generated.height,
-                "duration_secs": total_duration_secs,
-                "total_duration_secs": total_duration_secs,
-                "requested_duration_secs": duration_secs,
-                "clip_count": clip_entries.len(),
-                "clips": clip_entries,
-                "requires_concat": requires_concat,
-                "provider_message": generated.provider_message,
-                "provider": generated.provider,
-                "path": primary_mirrored_path
-            }),
-        ))
+        let metadata = json!({
+            "complete": if !requires_concat && !duration_measurable { json!("unknown") } else { json!(complete) },
+            "next_action": next_action,
+            "artifact_id": primary.id,
+            "artifact_ids": artifact_ids,
+            "intermediate_artifact_ids": intermediate_artifact_ids,
+            "artifact_kind": "video",
+            "filename": primary.name,
+            "mime_type": primary.mime_type,
+            "size_bytes": primary.size_bytes,
+            "sha256": primary.sha256,
+            "width": generated.width,
+            "height": generated.height,
+            "duration_secs": total_duration_secs,
+            "total_duration_secs": total_duration_secs,
+            "requested_duration_secs": duration_secs,
+            "clip_count": clip_entries.len(),
+            "clips": clip_entries,
+            "requires_concat": requires_concat,
+            "provider_message": generated.provider_message,
+            "provider": generated.provider,
+            "path": primary_mirrored_path
+        });
+
+        if has_op_store {
+            let mut all_persisted_ids = intermediate_artifact_ids.clone();
+            if let Some(ids) = metadata.get("artifact_ids").and_then(Value::as_array) {
+                for id in ids.iter().filter_map(Value::as_str) {
+                    if !all_persisted_ids.iter().any(|x| x == id) {
+                        all_persisted_ids.push(id.to_string());
+                    }
+                }
+            }
+            ctx.operation()
+                .advance(orchestrator_agent_rs::OperationUpdate {
+                    status: Some(orchestrator_agent_rs::ToolOperationStatus::Committed),
+                    artifact_ids_json: Some(json!(all_persisted_ids).to_string()),
+                    result_json: Some(
+                        json!({
+                            "content": summary,
+                            "metadata": metadata,
+                        })
+                        .to_string(),
+                    ),
+                    ..Default::default()
+                })
+                .await?;
+        }
+
+        Ok(host_tool_outcome(&ctx, summary, metadata))
     }
 }
 
