@@ -598,3 +598,95 @@ async fn video_create_passes_the_job_root_session_id_as_continuation_key() {
         "a root session's continuation key is its own session id"
     );
 }
+
+#[tokio::test]
+async fn video_create_rejects_duration_above_provider_limit_instead_of_clamping() {
+    use orchestrator_agent_rs::test_support::ScriptedGateway;
+    use orchestrator_agent_rs::{
+        AgentDefinition, AgentMode, CallerContext, LlmBackend, LlmConfig, LlmProviderConfig,
+        Orchestrator, OrchestratorConfig, ProviderAuth, SecretString,
+    };
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+
+    let seen_keys = Arc::new(Mutex::new(Vec::new()));
+    let vid_tool = VideoCreateTool::new(Arc::new(RecordingVideoBackend {
+        seen_keys: Arc::clone(&seen_keys),
+    }))
+    .with_output_dir(dir.path().join("videos"))
+    .into_host_tool();
+
+    // The recording backend advertises the default 60s ceiling.
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "Generating",
+        vec![(
+            "call_vid_90",
+            "video_create",
+            json!({ "filename": "long.mp4", "prompt": "scene", "duration_secs": 90 }),
+        )],
+    );
+    gw.push_text("done");
+
+    let agent = AgentDefinition::new("media_agent", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Media creator")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["video_create"])
+        .with_steps(4);
+    let llm_cfg = LlmConfig {
+        providers: vec![LlmProviderConfig {
+            id: "test".to_string(),
+            backend: LlmBackend::OpenAiCompatible,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
+            request_timeout: Duration::from_secs(10),
+        }],
+    };
+    let orch = Orchestrator::builder(OrchestratorConfig::new(
+        llm_cfg,
+        vec![agent],
+        dir.path().join("orch_store"),
+    ))
+    .with_gateway(gw.clone())
+    .register_tool(vid_tool)
+    .build()
+    .await
+    .unwrap();
+
+    let caller = CallerContext::new("owner1", "ws1");
+    let session_id = orch.create_session(&caller, "media_agent").await.unwrap();
+    orch.submit(&caller, &session_id, "Make a 90s video".to_string())
+        .await
+        .unwrap();
+    let mut failed_text = None;
+    for _ in 0..100 {
+        let snap = orch.snapshot(&caller, &session_id).await.unwrap();
+        let result = snap
+            .root
+            .invocations
+            .iter()
+            .find(|i| i.tool_name == "video_create")
+            .and_then(|inv| inv.result.as_ref());
+        if let Some(result) = result {
+            if !snap.has_active_work() {
+                failed_text = Some(result.to_string());
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert!(
+        seen_keys.lock().unwrap().is_empty(),
+        "the backend must not be asked for a shortened video"
+    );
+    let text = failed_text.expect("video_create produced a result");
+    assert!(
+        text.contains("INVALID_ARGUMENT") && text.contains("max_total_duration_secs=60"),
+        "error names the limit so the agent can split the video: {text}"
+    );
+}

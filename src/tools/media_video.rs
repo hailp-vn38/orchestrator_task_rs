@@ -337,12 +337,22 @@ impl HostTool for VideoCreateTool {
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
         let constraints = self.backend.video_constraints();
+        let max_total = constraints.max_total_duration_secs.max(1);
         let duration_secs = args
             .get("duration_secs")
             .and_then(Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(4)
-            .clamp(1, constraints.max_total_duration_secs.max(1));
+            .max(1);
+        if duration_secs > max_total {
+            // Never shorten silently: the agent must know the video it asked for cannot be made.
+            return Err(host_tool_err(
+                "INVALID_ARGUMENT",
+                format!(
+                    "duration_secs={duration_secs} exceeds this provider's max_total_duration_secs={max_total}. Split the video at scene boundaries into several video_create calls of at most {max_total}s each, then merge the resulting clips in order with video_concat."
+                ),
+            ));
+        }
         let requested_role = parse_role(args.get("role").and_then(Value::as_str));
         let first_frame = resolve_first_frame_from_args(Some(&ctx), &args).await?;
 
