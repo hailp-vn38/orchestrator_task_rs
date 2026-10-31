@@ -16,7 +16,8 @@ impl VideoGeneratorBackend for MultiClipTestVideoBackend {
     async fn generate_video(
         &self,
         req: &VideoGenerationRequest,
-    ) -> Result<GeneratedVideoPayload, String> {
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
         let (width, height) = req.effective_dimensions();
         let mut clips = Vec::new();
         for (idx, &dur) in self.clip_durations.iter().enumerate() {
@@ -489,7 +490,8 @@ impl VideoGeneratorBackend for RecordingVideoBackend {
     async fn generate_video(
         &self,
         req: &VideoGenerationRequest,
-    ) -> Result<GeneratedVideoPayload, String> {
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
         self.seen_keys
             .lock()
             .unwrap()
@@ -704,7 +706,8 @@ impl VideoGeneratorBackend for HangingVideoBackend {
     async fn generate_video(
         &self,
         _req: &VideoGenerationRequest,
-    ) -> Result<GeneratedVideoPayload, String> {
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
         self.started
             .store(true, std::sync::atomic::Ordering::SeqCst);
         std::future::pending::<()>().await;
@@ -894,4 +897,215 @@ async fn video_create_text_reports_a_full_length_video_as_complete() {
         text.contains("requested=5s actual=5s complete=true next_action=none"),
         "{text}"
     );
+}
+
+struct UnmeasurableVideoBackend;
+
+#[async_trait::async_trait]
+impl VideoGeneratorBackend for UnmeasurableVideoBackend {
+    async fn generate_video(
+        &self,
+        req: &VideoGenerationRequest,
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+        let (width, height) = req.effective_dimensions();
+        // Bytes without an mvhd atom so inspect_mp4_duration_secs returns None.
+        let raw_bytes = b"\x00\x00\x00\x14ftypisom\x00\x00\x02\x00isom".to_vec();
+        Ok(GeneratedVideoPayload {
+            filename: req.filename.clone(),
+            mime_type: "video/mp4".to_string(),
+            bytes: raw_bytes.clone(),
+            width,
+            height,
+            duration_secs: 0,
+            provider: "test".to_string(),
+            clips: vec![GeneratedVideoClip {
+                filename: req.filename.clone(),
+                mime_type: "video/mp4".to_string(),
+                bytes: raw_bytes,
+                width,
+                height,
+                duration_secs: 0,
+            }],
+            provider_message: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn unmeasurable_video_not_complete() {
+    use orchestrator_agent_rs::test_support::ScriptedGateway;
+    use orchestrator_agent_rs::{
+        AgentDefinition, AgentMode, CallerContext, LlmBackend, LlmConfig, LlmProviderConfig,
+        Orchestrator, OrchestratorConfig, ProviderAuth, SecretString,
+    };
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let vid_tool = VideoCreateTool::new(Arc::new(UnmeasurableVideoBackend))
+        .with_output_dir(dir.path().join("videos"))
+        .into_host_tool();
+
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "Generating",
+        vec![(
+            "call_vid",
+            "video_create",
+            json!({ "filename": "a.mp4", "prompt": "scene", "duration_secs": 10 }),
+        )],
+    );
+    gw.push_text("done");
+    let agent = AgentDefinition::new("media_agent", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Media creator")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["video_create"])
+        .with_steps(4);
+    let llm_cfg = LlmConfig {
+        providers: vec![LlmProviderConfig {
+            id: "test".to_string(),
+            backend: LlmBackend::OpenAiCompatible,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
+        }],
+    };
+    let orch = Orchestrator::builder(OrchestratorConfig::new(
+        llm_cfg,
+        vec![agent],
+        dir.path().join("orch_store"),
+    ))
+    .with_gateway(gw.clone())
+    .register_tool(vid_tool)
+    .build()
+    .await
+    .unwrap();
+    let caller = CallerContext::new("owner1", "ws1");
+    let session_id = orch.create_session(&caller, "media_agent").await.unwrap();
+    orch.submit(&caller, &session_id, "Make a video".to_string())
+        .await
+        .unwrap();
+    let mut text = None;
+    for _ in 0..100 {
+        let snap = orch.snapshot(&caller, &session_id).await.unwrap();
+        let result = snap
+            .root
+            .invocations
+            .iter()
+            .find(|i| i.tool_name == "video_create")
+            .and_then(|inv| inv.result.as_ref());
+        if let Some(result) = result {
+            if !snap.has_active_work() {
+                assert_eq!(result["metadata"]["complete"], "unknown");
+                text = Some(result["content"].as_str().unwrap_or_default().to_string());
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let text = text.expect("video_create settled");
+    assert!(
+        text.contains("complete=unknown"),
+        "unmeasurable MP4 duration must report complete=unknown: {text}"
+    );
+    orch.shutdown().await.unwrap();
+}
+
+struct TimeoutVideoBackend;
+
+#[async_trait::async_trait]
+impl VideoGeneratorBackend for TimeoutVideoBackend {
+    async fn generate_video(
+        &self,
+        _req: &VideoGenerationRequest,
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+        Err(MediaBackendError::new(
+            "VIDEO_GENERATION_TIMEOUT",
+            "the video provider did not finish in time",
+            true,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn video_timeout_code() {
+    use orchestrator_agent_rs::test_support::ScriptedGateway;
+    use orchestrator_agent_rs::{
+        AgentDefinition, AgentMode, CallerContext, LlmBackend, LlmConfig, LlmProviderConfig,
+        Orchestrator, OrchestratorConfig, ProviderAuth, SecretString,
+    };
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let vid_tool = VideoCreateTool::new(Arc::new(TimeoutVideoBackend)).into_host_tool();
+
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "Generating",
+        vec![(
+            "call_vid_to",
+            "video_create",
+            json!({ "filename": "a.mp4", "prompt": "scene", "duration_secs": 10 }),
+        )],
+    );
+    gw.push_text("done");
+    let agent = AgentDefinition::new("media_agent", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Media creator")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["video_create"])
+        .with_steps(4);
+    let llm_cfg = LlmConfig {
+        providers: vec![LlmProviderConfig {
+            id: "test".to_string(),
+            backend: LlmBackend::OpenAiCompatible,
+            endpoint: Some("http://127.0.0.1:9".to_string()),
+            auth: ProviderAuth::ApiKey(SecretString::new("test-key")),
+            limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
+        }],
+    };
+    let orch = Orchestrator::builder(OrchestratorConfig::new(
+        llm_cfg,
+        vec![agent],
+        dir.path().join("orch_store"),
+    ))
+    .with_gateway(gw.clone())
+    .register_tool(vid_tool)
+    .build()
+    .await
+    .unwrap();
+    let caller = CallerContext::new("owner1", "ws1");
+    let session_id = orch.create_session(&caller, "media_agent").await.unwrap();
+    orch.submit(&caller, &session_id, "Make a video".to_string())
+        .await
+        .unwrap();
+    let mut failed_text = None;
+    for _ in 0..100 {
+        let snap = orch.snapshot(&caller, &session_id).await.unwrap();
+        let result = snap
+            .root
+            .invocations
+            .iter()
+            .find(|i| i.tool_name == "video_create")
+            .and_then(|inv| inv.result.as_ref());
+        if let Some(result) = result {
+            if !snap.has_active_work() {
+                failed_text = Some(result.to_string());
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let text = failed_text.expect("video_create produced a result");
+    assert!(
+        text.contains("VIDEO_GENERATION_TIMEOUT"),
+        "video_create must propagate VIDEO_GENERATION_TIMEOUT in ToolError: {text}"
+    );
+    orch.shutdown().await.unwrap();
 }

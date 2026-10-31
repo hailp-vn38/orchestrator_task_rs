@@ -21,6 +21,7 @@ pub(crate) use crate::tools::media_image_codecs::{
     encode_gradient_png, ensure_svg_root_dimensions, extract_svg_root_dimensions, render_svg_card,
     resolve_first_frame_from_args, resolve_image_references_from_args,
 };
+use crate::tools::media_video::MediaCallContext;
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
 /// Ảnh tham chiếu đã được xác minh toàn vẹn để chuyển xuống Backend.
@@ -109,6 +110,7 @@ pub trait ImageGeneratorBackend: Send + Sync {
     async fn generate_image(
         &self,
         req: &ImageGenerationRequest,
+        ctx: &MediaCallContext,
     ) -> Result<GeneratedImagePayload, String>;
 }
 
@@ -122,6 +124,7 @@ impl ImageGeneratorBackend for DefaultImageGeneratorBackend {
     async fn generate_image(
         &self,
         req: &ImageGenerationRequest,
+        _ctx: &MediaCallContext,
     ) -> Result<GeneratedImagePayload, String> {
         let (width, height) = req.effective_dimensions();
 
@@ -362,11 +365,20 @@ impl HostTool for ImageCreateTool {
         req.width = width;
         req.height = height;
 
-        let generated = self
-            .backend
-            .generate_image(&req)
-            .await
-            .map_err(|e| host_tool_err("IMAGE_GENERATION_FAILED", e))?;
+        let call_ctx = MediaCallContext {
+            cancel: ctx.cancel_signal().clone(),
+        };
+        let generated = tokio::select! {
+            result = self.backend.generate_image(&req, &call_ctx) => {
+                result.map_err(|e| host_tool_err("IMAGE_GENERATION_FAILED", e))?
+            }
+            () = ctx.cancel_token().cancelled() => {
+                return Err(host_tool_err(
+                    "CANCELLED",
+                    "image generation was cancelled before the provider finished",
+                ));
+            }
+        };
 
         let mirrored_path = mirror_artifact_to_dir(
             self.output_dir.as_ref(),

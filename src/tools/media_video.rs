@@ -28,8 +28,49 @@ use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 /// Video ngắn hơn yêu cầu tối đa chừng này (nửa một clip 10s) vẫn được coi là hoàn tất.
 const VIDEO_DURATION_TOLERANCE_SECS: u32 = 5;
 
-/// Chu kỳ kiểm tra cờ hủy hợp tác trong lúc chờ provider sinh video.
-const CANCEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+/// Ngữ cảnh điều phối truyền xuống các backend media (`image_create`, `video_create`),
+/// bao gồm tín hiệu hủy hợp tác / shutdown.
+#[derive(Debug, Clone, Default)]
+pub struct MediaCallContext {
+    pub cancel: orchestrator_agent_rs::CancelSignal,
+}
+
+/// Lỗi có cấu trúc từ [`VideoGeneratorBackend`] để giữ nguyên mã lỗi gốc (`VIDEO_GENERATION_TIMEOUT`,
+/// `PROVIDER_RATE_LIMITED`, v.v.) lên tới `ToolError`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaBackendError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl MediaBackendError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable,
+        }
+    }
+}
+
+impl From<String> for MediaBackendError {
+    fn from(message: String) -> Self {
+        Self::new("VIDEO_GENERATION_FAILED", message, false)
+    }
+}
+
+impl From<&str> for MediaBackendError {
+    fn from(message: &str) -> Self {
+        Self::new("VIDEO_GENERATION_FAILED", message.to_string(), false)
+    }
+}
+
+impl std::fmt::Display for MediaBackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
 
 /// Yêu cầu sinh video gửi tới [`VideoGeneratorBackend`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,8 +170,7 @@ impl GeneratedVideoPayload {
             return std::mem::take(&mut self.clips);
         }
         let bytes = std::mem::take(&mut self.bytes);
-        let duration_secs =
-            inspect_mp4_duration_secs(&bytes).unwrap_or_else(|| self.duration_secs.max(1));
+        let duration_secs = inspect_mp4_duration_secs(&bytes).unwrap_or(self.duration_secs);
         vec![GeneratedVideoClip {
             filename: self.filename.clone(),
             mime_type: self.mime_type.clone(),
@@ -168,7 +208,8 @@ pub trait VideoGeneratorBackend: Send + Sync {
     async fn generate_video(
         &self,
         req: &VideoGenerationRequest,
-    ) -> Result<GeneratedVideoPayload, String>;
+        ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError>;
 }
 
 /// Backend tạo video mặc định tự chủ: kết xuất container ISO BMFF / MP4 (`video/mp4`) hợp lệ
@@ -181,7 +222,8 @@ impl VideoGeneratorBackend for DefaultVideoGeneratorBackend {
     async fn generate_video(
         &self,
         req: &VideoGenerationRequest,
-    ) -> Result<GeneratedVideoPayload, String> {
+        _ctx: &MediaCallContext,
+    ) -> Result<GeneratedVideoPayload, MediaBackendError> {
         let (width, height) = req.effective_dimensions();
         let duration_secs = req.duration_secs.clamp(1, 60);
         let mp4_bytes = encode_minimal_mp4(&req.prompt, width, height, duration_secs);
@@ -379,17 +421,14 @@ impl HostTool for VideoCreateTool {
 
         // Cancellation is cooperative: stop waiting for the provider as soon as the job is
         // cancelled instead of holding the run until the provider (or the tool timeout) gives up.
-        let generation = self.backend.generate_video(&req);
-        let cancelled = async {
-            while !ctx.is_cancelled() {
-                tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
-            }
+        let call_ctx = MediaCallContext {
+            cancel: ctx.cancel_signal().clone(),
         };
         let mut generated = tokio::select! {
-            result = generation => {
-                result.map_err(|e| host_tool_err("VIDEO_GENERATION_FAILED", e))?
+            result = self.backend.generate_video(&req, &call_ctx) => {
+                result.map_err(|e| host_tool_err(&e.code, e.message))?
             }
-            () = cancelled => {
+            () = ctx.cancel_token().cancelled() => {
                 return Err(host_tool_err(
                     "CANCELLED",
                     "video generation was cancelled before the provider finished",
@@ -405,6 +444,7 @@ impl HostTool for VideoCreateTool {
         let mut clip_entries = Vec::with_capacity(clips.len());
         let mut concat_inputs = Vec::with_capacity(if is_multi_clip { clips.len() } else { 0 });
         let mut total_duration_secs: u32 = 0;
+        let mut duration_measurable = true;
         let mut first_artifact = None;
         let mut first_mirrored_path = None;
 
@@ -421,8 +461,13 @@ impl HostTool for VideoCreateTool {
             } else {
                 requested_role
             };
-            let clip_duration =
-                inspect_mp4_duration_secs(&clip.bytes).unwrap_or_else(|| clip.duration_secs.max(1));
+            let clip_duration = match inspect_mp4_duration_secs(&clip.bytes) {
+                Some(d) => d,
+                None => {
+                    duration_measurable = false;
+                    clip.duration_secs
+                }
+            };
             total_duration_secs = total_duration_secs.saturating_add(clip_duration);
 
             let mirrored_path =
@@ -494,7 +539,12 @@ impl HostTool for VideoCreateTool {
                         &merged.filename,
                         &merged.bytes,
                     );
-                    total_duration_secs = merged.duration_secs.max(total_duration_secs);
+                    if let Some(merged_dur) = inspect_mp4_duration_secs(&merged.bytes) {
+                        duration_measurable = true;
+                        total_duration_secs = merged_dur.max(total_duration_secs);
+                    } else {
+                        total_duration_secs = merged.duration_secs.max(total_duration_secs);
+                    }
                     let merged_art = ctx
                         .artifacts()
                         .put(ArtifactInput::from_bytes(
@@ -554,7 +604,15 @@ impl HostTool for VideoCreateTool {
         // The model only reads `summary`; metadata is for hosts. State completeness in the text so
         // a short video is never mistaken for a finished one.
         let complete = !requires_concat
+            && duration_measurable
             && total_duration_secs.saturating_add(VIDEO_DURATION_TOLERANCE_SECS) >= duration_secs;
+        let complete_status = if !requires_concat && !duration_measurable {
+            "unknown"
+        } else if complete {
+            "true"
+        } else {
+            "false"
+        };
         let next_action = if requires_concat {
             "concat_required"
         } else if complete {
@@ -563,14 +621,14 @@ impl HostTool for VideoCreateTool {
             "call_again_same_job"
         };
         let summary = format!(
-            "{summary}\nrequested={duration_secs}s actual={total_duration_secs}s complete={complete} next_action={next_action}"
+            "{summary}\nrequested={duration_secs}s actual={total_duration_secs}s complete={complete_status} next_action={next_action}"
         );
 
         Ok(host_tool_outcome(
             &ctx,
             summary,
             json!({
-                "complete": complete,
+                "complete": if !requires_concat && !duration_measurable { json!("unknown") } else { json!(complete) },
                 "next_action": next_action,
                 "artifact_id": primary.id,
                 "artifact_ids": artifact_ids,

@@ -44,16 +44,19 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
 
     let wav_bytes = build_test_pcm16_wav(16_000, 16_000);
     let mp4_payload = orchestrator_flow_rs::DefaultVideoGeneratorBackend
-        .generate_video(&orchestrator_flow_rs::VideoGenerationRequest {
-            filename: "ban-ghi-hinh.mp4".to_string(),
-            prompt: "Demo video with spoken narration".to_string(),
-            title: Some("Demo Video".to_string()),
-            width: 640,
-            height: 360,
-            duration_secs: 2,
-            first_frame: None,
-            continuation_key: None,
-        })
+        .generate_video(
+            &orchestrator_flow_rs::VideoGenerationRequest {
+                filename: "ban-ghi-hinh.mp4".to_string(),
+                prompt: "Demo video with spoken narration".to_string(),
+                title: Some("Demo Video".to_string()),
+                width: 640,
+                height: 360,
+                duration_secs: 2,
+                first_frame: None,
+                continuation_key: None,
+            },
+            &orchestrator_flow_rs::MediaCallContext::default(),
+        )
         .await
         .unwrap();
     let mp4_bytes = mp4_payload.bytes;

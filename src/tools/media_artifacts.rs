@@ -56,9 +56,10 @@ pub use crate::tools::media_tts::{
 };
 pub use crate::tools::media_video::{
     normalize_video_stem, ConcatenatedVideoPayload, DefaultVideoConcatBackend,
-    DefaultVideoGeneratorBackend, GeneratedVideoClip, GeneratedVideoPayload, VideoConcatBackend,
-    VideoConcatInputClip, VideoConcatRequest, VideoConcatTool, VideoCreateTool,
-    VideoGenerationRequest, VideoGeneratorBackend, VideoProviderConstraints, VIDEO_CONCAT_TOOL,
+    DefaultVideoGeneratorBackend, GeneratedVideoClip, GeneratedVideoPayload, MediaBackendError,
+    MediaCallContext, VideoConcatBackend, VideoConcatInputClip, VideoConcatRequest,
+    VideoConcatTool, VideoCreateTool, VideoGenerationRequest, VideoGeneratorBackend,
+    VideoProviderConstraints, VIDEO_CONCAT_TOOL,
 };
 #[cfg(test)]
 pub(crate) use crate::tools::media_video_concat::encode_minimal_mp4;
