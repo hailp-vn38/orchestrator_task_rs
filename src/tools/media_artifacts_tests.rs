@@ -132,6 +132,7 @@ async fn default_image_and_video_backends_support_both_default_and_agent_custom_
             height: 0,
             duration_secs: 4,
             first_frame: None,
+            continuation_key: None,
         })
         .await
         .unwrap();

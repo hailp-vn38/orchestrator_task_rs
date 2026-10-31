@@ -52,6 +52,7 @@ async fn task_with_input_wav_artifact_and_asr_transcribe_tool_end_to_end() {
             height: 360,
             duration_secs: 2,
             first_frame: None,
+            continuation_key: None,
         })
         .await
         .unwrap();

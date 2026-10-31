@@ -36,6 +36,10 @@ pub struct VideoGenerationRequest {
     pub duration_secs: u32,
     #[serde(default)]
     pub first_frame: Option<ReferenceImageInput>,
+    /// Khoá liên tục theo job (root session id của lần gọi tool). Backend dùng khoá này để giữ
+    /// một session phía provider cho mọi lần `video_create` trong cùng một job.
+    #[serde(default)]
+    pub continuation_key: Option<String>,
 }
 
 impl VideoGenerationRequest {
@@ -350,6 +354,8 @@ impl HostTool for VideoCreateTool {
             height: raw_height,
             duration_secs,
             first_frame,
+            continuation_key: Some(ctx.scope().root_session_id.clone())
+                .filter(|key| !key.trim().is_empty()),
         };
         let (width, height) = req.effective_dimensions();
         req.width = width;
