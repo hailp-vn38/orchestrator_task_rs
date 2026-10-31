@@ -112,12 +112,15 @@ impl SharedTaskCore {
             (None, Vec::new())
         };
 
-        Ok(TaskDetailView::from_parts_with_artifacts(
-            task,
-            followups,
-            family_snapshot,
-            artifacts,
-        ))
+        let max_resume_attempts = self
+            .flows()?
+            .get_flow(&task.flow_id)
+            .ok()
+            .map(|orch| orch.max_resume_attempts());
+        let mut detail =
+            TaskDetailView::from_parts_with_artifacts(task, followups, family_snapshot, artifacts);
+        detail.max_resume_attempts = max_resume_attempts;
+        Ok(detail)
     }
 
     /// Liệt kê toàn bộ các Artifact đã commit thuộc về một Task (gồm cả Root Agent và các Subagent con).

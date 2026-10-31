@@ -504,10 +504,20 @@ impl HostTool for VideoCreateTool {
         })
         .to_string();
 
-        let (has_op_store, existing_op) = match ctx.operation().current().await {
-            Ok(op) => (true, op),
-            Err(e) if e.code == "ARTIFACT_UNAVAILABLE" => (false, None),
-            Err(e) => return Err(e),
+        let has_op_store = ctx.operation().is_available();
+        let existing_op = if has_op_store {
+            ctx.operation().current().await.map_err(|e| {
+                if e.code == "ARTIFACT_UNAVAILABLE" {
+                    host_tool_err(
+                        "TOOL_OUTCOME_UNKNOWN",
+                        "could not read the durable video operation",
+                    )
+                } else {
+                    e
+                }
+            })?
+        } else {
+            None
         };
 
         enum DispatchAction {
@@ -521,7 +531,11 @@ impl HostTool for VideoCreateTool {
         } else {
             match existing_op {
                 None => {
-                    let deadline_at = ctx.operation().now_secs().saturating_add(900);
+                    let extra_batches = duration_secs.max(1).div_ceil(60).saturating_sub(1);
+                    let deadline_at = ctx
+                        .operation()
+                        .now_secs()
+                        .saturating_add(900 + 800 * i64::from(extra_batches));
                     let mut op = ctx
                         .operation()
                         .begin(deadline_at, &constraints.provider_label)
@@ -638,8 +652,7 @@ impl HostTool for VideoCreateTool {
         let call_ctx = MediaCallContext {
             cancel: ctx.cancel_signal().clone(),
             operation: op_for_ctx,
-            journal: has_op_store
-                .then(|| Arc::new(ctx.clone()) as Arc<dyn VideoOperationJournal>),
+            journal: has_op_store.then(|| Arc::new(ctx.clone()) as Arc<dyn VideoOperationJournal>),
         };
         let backend_fut = async {
             match &action {
@@ -655,7 +668,10 @@ impl HostTool for VideoCreateTool {
                 match result {
                     Ok(payload) => payload,
                     Err(e) => {
-                        if has_op_store && e.code != "TOOL_OUTCOME_UNKNOWN" {
+                        let shutting_down = ctx.cancel_reason()
+                            == Some(orchestrator_agent_rs::CancelReason::Shutdown);
+                        if has_op_store && e.code != "TOOL_OUTCOME_UNKNOWN"
+                            && !(shutting_down && e.code == "CANCELLED") {
                             let status = if e.code == "VIDEO_GENERATION_TIMEOUT" {
                                 orchestrator_agent_rs::ToolOperationStatus::Expired
                             } else if e.code == "CANCELLED" {

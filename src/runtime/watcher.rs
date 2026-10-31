@@ -109,7 +109,10 @@ async fn run_task_watcher(core: Arc<SharedTaskCore>, initial_task: TaskView) {
 }
 
 async fn emit_task_progress(core: &SharedTaskCore, task: &TaskView, update: ProgressUpdate<'_>) {
-    let _ = core.store.clear_task_waiting(&task.id, update.progress_summary.unwrap_or("Running...")).await;
+    let _ = core
+        .store
+        .clear_task_waiting(&task.id, update.progress_summary.unwrap_or("Running..."))
+        .await;
     let _ = core.store.update_task_progress(&task.id, update).await;
     core.event_bus.emit(TaskEvent::TaskProgress {
         task_id: task.id.clone(),
@@ -144,6 +147,42 @@ async fn handle_execution_event(
     }
 
     match ev.event_type.as_str() {
+        "run.started" => {
+            // Do not settle terminal state ahead of message/tool events that
+            // are still queued in this subscription.
+            let Ok(Some(current)) = core.store.get_task_unscoped(&task.id).await else {
+                return false;
+            };
+            if current.status != TaskStatus::Waiting {
+                return false;
+            }
+            let Some(turn_id) = current.latest_turn_id.as_deref() else {
+                return false;
+            };
+            let Ok(flows) = core.flows() else {
+                return false;
+            };
+            let Ok(orch) = flows.get_flow(&current.flow_id) else {
+                return false;
+            };
+            let caller =
+                TaskScope::new(&current.owner_id, &current.workspace_id).to_caller_context();
+            if let Ok(result) = orch.result(&caller, &current.session_id, turn_id).await {
+                if result.status == orchestrator_agent_rs::RunStatus::Running {
+                    emit_task_progress(
+                        core,
+                        &current,
+                        ProgressUpdate {
+                            active_subagent: None,
+                            active_tool: None,
+                            progress_summary: Some("Running resumed turn..."),
+                        },
+                    )
+                    .await;
+                }
+            }
+            false
+        }
         "message.committed" => {
             if let Some(text) = ev
                 .payload

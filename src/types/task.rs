@@ -62,11 +62,7 @@ impl TaskStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed
-                | Self::Failed
-                | Self::Cancelled
-                | Self::Interrupted
-                | Self::Stopped
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted | Self::Stopped
         )
     }
 }
@@ -233,6 +229,9 @@ pub struct FollowupView {
 /// của `root_agent` + `subagents`, và `FamilySnapshot` gốc từ `Orchestrator`).
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDetailView {
+    /// Configured recovery limit of the owning flow, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_resume_attempts: Option<u32>,
     pub task: TaskView,
     pub followups: Vec<FollowupView>,
     pub artifacts: Vec<TaskArtifactView>,
@@ -274,6 +273,7 @@ impl TaskDetailView {
         };
 
         Self {
+            max_resume_attempts: None,
             task,
             followups,
             artifacts,

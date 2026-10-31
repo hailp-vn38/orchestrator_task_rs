@@ -395,10 +395,7 @@ async fn thinking_blocks_are_stripped_and_empty_thinking_fails_task() {
         {
             if t.id == t2.id {
                 assert_eq!(t.status, TaskStatus::Failed);
-                assert_eq!(
-                    t.error_code.as_deref(),
-                    Some("RECOVERY_ATTEMPTS_EXHAUSTED")
-                );
+                assert_eq!(t.error_code.as_deref(), Some("RECOVERY_ATTEMPTS_EXHAUSTED"));
                 assert!(
                     t.error_message
                         .as_deref()
@@ -418,6 +415,15 @@ async fn thinking_blocks_are_stripped_and_empty_thinking_fails_task() {
 
 #[tokio::test]
 async fn task_waiting_not_failed() {
+    assert_task_waiting_resume(false).await;
+}
+
+#[tokio::test]
+async fn task_waiting_cleared_when_orchestrator_resumes() {
+    assert_task_waiting_resume(true).await;
+}
+
+async fn assert_task_waiting_resume(direct_resume: bool) {
     use orchestrator_agent_rs::test_support::GatewayError;
 
     let dir = tempfile::tempdir().unwrap();
@@ -430,7 +436,15 @@ async fn task_waiting_not_failed() {
 
     let daily_gw = ScriptedGateway::new();
     daily_gw.push_error(GatewayError::Timeout);
-    daily_gw.push_text("Hoàn thành sau khi resume từ trạng thái chờ.");
+    daily_gw.push_delayed(
+        Duration::from_secs(2),
+        orchestrator_agent_rs::test_support::ModelResponse {
+            text: "Hoàn thành sau khi resume từ trạng thái chờ.".into(),
+            tool_calls: vec![],
+            usage: None,
+            finish_reason: "stop".into(),
+        },
+    );
 
     let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
         .with_mode(AgentMode::Primary)
@@ -485,7 +499,10 @@ async fn task_waiting_not_failed() {
             }
         }
     }
-    assert!(saw_waiting_progress, "expected TaskProgress with TaskStatus::Waiting");
+    assert!(
+        saw_waiting_progress,
+        "expected TaskProgress with TaskStatus::Waiting"
+    );
 
     let waiting_task = task_mgr.get_task(&created.id).await.unwrap();
     assert_eq!(waiting_task.status, TaskStatus::Waiting);
@@ -495,14 +512,40 @@ async fn task_waiting_not_failed() {
     );
     assert!(waiting_task.next_attempt_at.is_some());
 
-    // Khi gọi resume_waiting_task_any_scope -> Task chạy tiếp và phát TaskTerminal(Completed).
-    let resumed = task_mgr
-        .resume_waiting_task_any_scope(&created.id)
-        .await
-        .unwrap();
-    assert_eq!(resumed.status, TaskStatus::Running);
-    assert!(resumed.wait_reason.is_none());
-    assert!(resumed.next_attempt_at.is_none());
+    if direct_resume {
+        daily_orch
+            .resume_waiting(
+                &orchestrator_agent_rs::CallerContext::new(
+                    &waiting_task.owner_id,
+                    &waiting_task.workspace_id,
+                ),
+                &waiting_task.session_id,
+            )
+            .await
+            .unwrap();
+        let until = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let resumed = task_mgr.get_task(&created.id).await.unwrap();
+            if resumed.status == TaskStatus::Running {
+                assert!(resumed.wait_reason.is_none());
+                assert!(resumed.next_attempt_at.is_none());
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < until,
+                "resumed run still projects stale waiting state: {resumed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    } else {
+        let resumed = task_mgr
+            .resume_waiting_task_any_scope(&created.id)
+            .await
+            .unwrap();
+        assert_eq!(resumed.status, TaskStatus::Running);
+        assert!(resumed.wait_reason.is_none());
+        assert!(resumed.next_attempt_at.is_none());
+    }
 
     let mut completed_task = None;
     for _ in 0..30 {
@@ -520,6 +563,118 @@ async fn task_waiting_not_failed() {
     assert_eq!(
         finished.output_preview.as_deref(),
         Some("Hoàn thành sau khi resume từ trạng thái chờ.")
+    );
+
+    task_mgr.shutdown().await.unwrap();
+    daily_orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_budget_exhausted_becomes_stopped() {
+    struct SlowVoiceTool;
+
+    #[async_trait::async_trait]
+    impl orchestrator_agent_rs::HostTool for SlowVoiceTool {
+        fn descriptor(&self) -> orchestrator_agent_rs::ToolDescriptor {
+            orchestrator_agent_rs::ToolDescriptor {
+                name: "slow_voice".into(),
+                description: "takes 5 minutes".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                effect: orchestrator_agent_rs::ToolEffect::ReadOnly,
+            }
+        }
+
+        async fn execute(
+            &self,
+            ctx: orchestrator_agent_rs::ToolContext,
+            _args: serde_json::Value,
+        ) -> Result<orchestrator_agent_rs::ToolOutcome, orchestrator_agent_rs::ToolError> {
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            Ok(orchestrator_agent_rs::ToolOutcome {
+                call_id: ctx.scope().tool_call_id.clone(),
+                content: "five minutes elapsed".into(),
+                metadata: serde_json::Value::Null,
+            })
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are daily_root.").unwrap();
+
+    let task_cfg =
+        TaskConfig::new(dir.path().join("task_store")).with_default_target("daily", "daily_root");
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    let daily_gw = ScriptedGateway::new();
+    daily_gw.push_tool_calls("", vec![("sv1", "slow_voice", json!({}))]);
+    daily_gw.push_text("Tóm tắt từng phần trước khi hết ngân sách 5 phút.");
+
+    let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily assistant")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["slow_voice"]);
+
+    let mut orch_cfg = OrchestratorConfig::new(
+        test_llm_config(),
+        vec![daily_agent],
+        dir.path().join("daily_store"),
+    );
+    orch_cfg.runtime.tool_timeout = Duration::from_secs(600);
+    orch_cfg.runtime.supervisor_sweep = Duration::from_secs(5);
+    let daily_orch = Arc::new(
+        Orchestrator::builder(orch_cfg)
+            .with_gateway(daily_gw.clone())
+            .register_tool(Arc::new(SlowVoiceTool))
+            .build()
+            .await
+            .unwrap(),
+    );
+
+    let task_mgr = task_init
+        .register_flow("daily", daily_orch.clone())
+        .start()
+        .await
+        .unwrap();
+
+    tokio::time::pause();
+    let created = task_mgr
+        .create_task(
+            CreateTaskRequest::new("Job Voice 5 phút", "Chạy tác vụ dài")
+                .with_source(TaskSource::Voice),
+        )
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let finished = loop {
+        let t = task_mgr.get_task(&created.id).await.unwrap();
+        if t.status.is_terminal() {
+            break t;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "task_budget_exhausted_becomes_stopped stuck: {t:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    };
+
+    assert_eq!(finished.status, TaskStatus::Stopped, "{finished:?}");
+    assert_eq!(finished.error_code.as_deref(), Some("BUDGET_EXHAUSTED"));
+    assert_eq!(
+        finished.output_preview.as_deref(),
+        Some("Tóm tắt từng phần trước khi hết ngân sách 5 phút.")
+    );
+    let reqs = daily_gw.requests();
+    assert_eq!(reqs.len(), 2);
+    assert!(
+        reqs[1].tools.is_empty(),
+        "step 2 after 5m Voice budget must strip tools"
     );
 
     task_mgr.shutdown().await.unwrap();

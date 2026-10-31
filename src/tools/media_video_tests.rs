@@ -801,7 +801,10 @@ async fn video_create_stops_waiting_for_the_provider_when_the_job_is_cancelled()
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(idle, "a cancelled job must not keep waiting on the provider");
+    assert!(
+        idle,
+        "a cancelled job must not keep waiting on the provider"
+    );
 }
 
 /// Runs one `video_create` call (the recording backend always delivers a 5s clip) and returns the
@@ -1111,7 +1114,7 @@ async fn video_timeout_code() {
 }
 
 struct DurablePhase4Backend {
-    submit_calls: Arc< std::sync::atomic::AtomicUsize>,
+    submit_calls: Arc<std::sync::atomic::AtomicUsize>,
     resume_calls: Arc<std::sync::atomic::AtomicUsize>,
     download_calls: Arc<std::sync::atomic::AtomicUsize>,
     reconcile_mode: SubmittingReconciliation,
@@ -1166,10 +1169,11 @@ impl VideoGeneratorBackend for DurablePhase4Backend {
     ) -> Result<GeneratedVideoPayload, MediaBackendError> {
         self.submit_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.seen_submit_remote_session_ids
-            .lock()
-            .unwrap()
-            .push(ctx.operation.as_ref().and_then(|op| op.remote_session_id.clone()));
+        self.seen_submit_remote_session_ids.lock().unwrap().push(
+            ctx.operation
+                .as_ref()
+                .and_then(|op| op.remote_session_id.clone()),
+        );
         Ok(Self::make_payload(req, req.duration_secs.max(5)))
     }
 
@@ -1593,7 +1597,11 @@ async fn kill_while_submitting_not_sent() {
     assert_eq!(backend.submit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        backend.seen_submit_remote_session_ids.lock().unwrap().as_slice(),
+        backend
+            .seen_submit_remote_session_ids
+            .lock()
+            .unwrap()
+            .as_slice(),
         &[Some("sess-sub-unsent".to_string())]
     );
     assert_eq!(arts.len(), 1);
@@ -1795,4 +1803,137 @@ async fn reconcile_with_prior_turns() {
         assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 1);
         orch.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn planned_shutdown_resumes_video_create_without_cancelling_operation() {
+    use orchestrator_agent_rs::test_support::ScriptedGateway;
+    use orchestrator_agent_rs::{
+        AgentDefinition, AgentMode, CallerContext, LlmBackend, LlmConfig, LlmProviderConfig,
+        Orchestrator, OrchestratorConfig, ProviderAuth, SecretString,
+    };
+    use std::time::Duration;
+    struct CooperativeVideo {
+        started: tokio::sync::Notify,
+        resumed: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl VideoGeneratorBackend for CooperativeVideo {
+        async fn generate_video(
+            &self,
+            _: &VideoGenerationRequest,
+            ctx: &MediaCallContext,
+        ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+            ctx.journal
+                .as_ref()
+                .unwrap()
+                .advance(orchestrator_agent_rs::OperationUpdate {
+                    status: Some(orchestrator_agent_rs::ToolOperationStatus::Running),
+                    remote_session_id: Some("render-during-shutdown".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            self.started.notify_one();
+            ctx.cancel.token().cancelled().await;
+            Err(MediaBackendError::new(
+                "CANCELLED",
+                "planned shutdown",
+                false,
+            ))
+        }
+        async fn resume_video(
+            &self,
+            req: &VideoGenerationRequest,
+            op: &orchestrator_agent_rs::ToolOperation,
+            _: &MediaCallContext,
+        ) -> Result<GeneratedVideoPayload, MediaBackendError> {
+            assert_eq!(
+                op.status,
+                orchestrator_agent_rs::ToolOperationStatus::Running
+            );
+            self.resumed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(DurablePhase4Backend::make_payload(req, 5))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let prompt = dir.path().join("media.md");
+    std::fs::write(&prompt, "Create videos").unwrap();
+    let backend = Arc::new(CooperativeVideo {
+        started: tokio::sync::Notify::new(),
+        resumed: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let tool = Arc::new(VideoCreateTool::new(backend.clone()));
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "",
+        vec![(
+            "v1",
+            "video_create",
+            json!({"filename":"movie.mp4", "prompt":"story", "duration_secs":5}),
+        )],
+    );
+    gw.push_text("video complete");
+    let config = || {
+        let agent = AgentDefinition::new("media_agent", "test", "model")
+            .with_mode(AgentMode::Primary)
+            .with_prompt_path(&prompt)
+            .with_allowed_tools(["video_create"]);
+        let llm = LlmConfig {
+            providers: vec![LlmProviderConfig {
+                id: "test".into(),
+                backend: LlmBackend::OpenAiCompatible,
+                endpoint: Some("http://127.0.0.1:9".into()),
+                auth: ProviderAuth::ApiKey(SecretString::new("test")),
+                limits: orchestrator_agent_rs::RequestLimits::uniform(Duration::from_secs(10)),
+            }],
+        };
+        let mut config = OrchestratorConfig::new(llm, vec![agent], dir.path().join("store"));
+        config.runtime.shutdown_drain = Duration::from_millis(10);
+        config.runtime.shutdown_grace = Duration::from_secs(1);
+        config
+    };
+    let o = Orchestrator::builder(config())
+        .with_gateway(gw.clone())
+        .register_tool(tool.clone())
+        .build()
+        .await
+        .unwrap();
+    let caller = CallerContext::new("owner", "workspace");
+    let sid = o.create_session(&caller, "media_agent").await.unwrap();
+    let turn = o.submit(&caller, &sid, "render".into()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), backend.started.notified())
+        .await
+        .unwrap();
+    o.shutdown().await.unwrap();
+    let restored = Orchestrator::builder(config())
+        .with_gateway(gw)
+        .register_tool(tool)
+        .build()
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let r = restored.result(&caller, &sid, &turn.turn_id).await.unwrap();
+            if r.status.is_terminal() {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        result.status,
+        orchestrator_agent_rs::RunStatus::Completed,
+        "{result:?}"
+    );
+    assert_eq!(backend.resumed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let ops = restored.list_tool_operations().await.unwrap();
+    assert_eq!(
+        ops[0].operation.status,
+        orchestrator_agent_rs::ToolOperationStatus::Committed
+    );
+    restored.shutdown().await.unwrap();
 }

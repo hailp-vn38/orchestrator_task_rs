@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use orchestrator_agent_rs::{ErrorCode as OrchErrorCode, RunStatus};
+use orchestrator_agent_rs::{
+    ErrorCode as OrchErrorCode, RunBudget, RunStatus, SubmitOptions, CODE_BUDGET_EXHAUSTED,
+};
 
 use crate::error::{TaskError, TaskResult};
 use crate::runtime::{lock, watcher, SharedTaskCore};
@@ -12,6 +14,23 @@ use crate::types::{
     CreateTaskRequest, FollowupStatus, FollowupView, TaskEvent, TaskScope, TaskSource, TaskStatus,
     TaskView,
 };
+
+pub(crate) fn budget_for_source(source: TaskSource) -> RunBudget {
+    let now = (now_ms() / 1000).max(0);
+    let (active_limit_secs, total_secs, reserve_secs) = match source {
+        TaskSource::Voice => (5 * 60, 5 * 60, 30),
+        TaskSource::Api | TaskSource::Chat => (2 * 3600, 24 * 3600, 10 * 60),
+        TaskSource::Schedule | TaskSource::Autoflow => (2 * 3600, 12 * 3600, 10 * 60),
+    };
+    RunBudget {
+        started_at: now,
+        total_deadline_at: now.saturating_add(total_secs),
+        active_limit_secs,
+        reserve_secs,
+        max_tokens: None,
+        waited_secs: 0,
+    }
+}
 
 impl SharedTaskCore {
     /// Tạo Task mới trên Flow tương ứng, gọi `Orchestrator::submit`, lưu vào `tasks.db`
@@ -43,15 +62,23 @@ impl SharedTaskCore {
 
         let task_id = new_id();
         let has_input_artifacts = !req.input_artifacts.is_empty();
+        let submit_opts = SubmitOptions {
+            budget: Some(budget_for_source(req.source)),
+        };
         let submitted = if has_input_artifacts {
             let prompt_owned = prompt.to_string();
-            orch.submit_with_artifacts(&caller, &session_id, req.input_artifacts, move |refs| {
-                format_prompt_with_artifacts(&prompt_owned, refs)
-            })
+            orch.submit_with_artifacts_and_options(
+                &caller,
+                &session_id,
+                req.input_artifacts,
+                submit_opts,
+                move |refs| format_prompt_with_artifacts(&prompt_owned, refs),
+            )
             .await
             .map(|(accepted, _)| accepted)
         } else {
-            orch.submit(&caller, &session_id, prompt.to_string()).await
+            orch.submit_with_options(&caller, &session_id, prompt.to_string(), submit_opts)
+                .await
         };
 
         match submitted {
@@ -155,8 +182,16 @@ impl SharedTaskCore {
             .await?;
 
         if task.status != TaskStatus::Running && task.status != TaskStatus::Waiting {
+            let submit_opts = SubmitOptions {
+                budget: Some(budget_for_source(source)),
+            };
             if let Ok(accepted) = orch
-                .submit(&caller, &task.session_id, clean_prompt.to_string())
+                .submit_with_options(
+                    &caller,
+                    &task.session_id,
+                    clean_prompt.to_string(),
+                    submit_opts,
+                )
                 .await
             {
                 self.store
@@ -315,6 +350,25 @@ impl SharedTaskCore {
         if let Some(ref turn_id) = task.latest_turn_id {
             let res = orch.result(&caller, &task.session_id, turn_id).await?;
             if res.status == RunStatus::Running {
+                if task.status == TaskStatus::Waiting {
+                    if self
+                        .store
+                        .clear_task_waiting(&task.id, "Running resumed turn...")
+                        .await?
+                        .is_some()
+                    {
+                        self.event_bus.emit(TaskEvent::TaskProgress {
+                            task_id: task.id.clone(),
+                            owner_id: task.owner_id.clone(),
+                            workspace_id: task.workspace_id.clone(),
+                            status: TaskStatus::Running,
+                            active_subagent: None,
+                            active_tool: None,
+                            progress_summary: Some("Running resumed turn...".into()),
+                            timestamp_ms: now_ms(),
+                        });
+                    }
+                }
                 return Ok(false);
             }
             if !res.status.is_terminal() {
@@ -353,11 +407,25 @@ impl SharedTaskCore {
                 return Ok(false);
             }
 
-            // Nếu turn vừa hoàn tất và có followup đang chờ trong hàng đợi -> tự động submit followup kế tiếp!
-            if res.status == RunStatus::Completed {
+            let is_budget_exhausted = res.status != RunStatus::Cancelled
+                && res
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code == CODE_BUDGET_EXHAUSTED);
+
+            // Nếu turn vừa hoàn tất bình thường và có followup đang chờ trong hàng đợi -> tự động submit followup kế tiếp!
+            if res.status == RunStatus::Completed && !is_budget_exhausted {
                 if let Some(next_fu) = self.store.next_pending_followup(&task.id).await? {
+                    let submit_opts = SubmitOptions {
+                        budget: Some(budget_for_source(next_fu.source)),
+                    };
                     if let Ok(accepted) = orch
-                        .submit(&caller, &task.session_id, next_fu.prompt.clone())
+                        .submit_with_options(
+                            &caller,
+                            &task.session_id,
+                            next_fu.prompt.clone(),
+                            submit_opts,
+                        )
                         .await
                     {
                         self.store
@@ -375,7 +443,11 @@ impl SharedTaskCore {
                 }
             }
 
-            let status = TaskStatus::from_run_status(res.status);
+            let status = if is_budget_exhausted {
+                TaskStatus::Stopped
+            } else {
+                TaskStatus::from_run_status(res.status)
+            };
             let preview = res
                 .output
                 .as_deref()
@@ -407,8 +479,16 @@ impl SharedTaskCore {
 
         // Trường hợp Task đang 'queued' (chưa có turn_id) và có followup chờ
         if let Some(next_fu) = self.store.next_pending_followup(&task.id).await? {
+            let submit_opts = SubmitOptions {
+                budget: Some(budget_for_source(next_fu.source)),
+            };
             if let Ok(accepted) = orch
-                .submit(&caller, &task.session_id, next_fu.prompt.clone())
+                .submit_with_options(
+                    &caller,
+                    &task.session_id,
+                    next_fu.prompt.clone(),
+                    submit_opts,
+                )
                 .await
             {
                 self.store
