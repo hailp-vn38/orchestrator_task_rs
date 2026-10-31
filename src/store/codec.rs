@@ -52,6 +52,8 @@ pub(crate) fn map_task_row(row: &SqliteRow) -> TaskView {
         progress_summary: row.get("progress_summary"),
         output_preview: row.get("output_preview"),
         related_wiki_links: decode_links(&links_raw),
+        wait_reason: row.get("wait_reason"),
+        next_attempt_at: row.get("next_attempt_at"),
         error_code: row.get("error_code"),
         error_message: row.get("error_message"),
         created_at: row.get("created_at"),

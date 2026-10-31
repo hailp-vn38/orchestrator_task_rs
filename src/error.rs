@@ -8,6 +8,7 @@ use orchestrator_agent_rs::OrchestratorError;
 pub enum ErrorCode {
     InvalidConfig,
     InvalidInput,
+    InvalidState,
     NotFound,
     PermissionDenied,
     SessionBusy,
@@ -23,6 +24,7 @@ impl ErrorCode {
         match self {
             Self::InvalidConfig => "INVALID_CONFIG",
             Self::InvalidInput => "INVALID_INPUT",
+            Self::InvalidState => "INVALID_STATE",
             Self::NotFound => "NOT_FOUND",
             Self::PermissionDenied => "PERMISSION_DENIED",
             Self::SessionBusy => "SESSION_BUSY",
@@ -55,6 +57,10 @@ impl TaskError {
 
     pub fn invalid_input(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidInput, message)
+    }
+
+    pub fn invalid_state(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidState, message)
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {

@@ -154,7 +154,7 @@ impl SharedTaskCore {
             .enqueue_followup(&task.id, clean_prompt, source)
             .await?;
 
-        if task.status != TaskStatus::Running {
+        if task.status != TaskStatus::Running && task.status != TaskStatus::Waiting {
             if let Ok(accepted) = orch
                 .submit(&caller, &task.session_id, clean_prompt.to_string())
                 .await
@@ -274,6 +274,35 @@ impl SharedTaskCore {
         Ok(())
     }
 
+    /// Tiếp tục ngay một Task đang ở trạng thái chờ (`waiting_retry` hoặc `waiting_user`).
+    pub(crate) async fn resume_waiting_task_internal(
+        self: &Arc<Self>,
+        scope: &TaskScope,
+        task_id: &str,
+    ) -> TaskResult<TaskView> {
+        self.ensure_open()?;
+        let task = self.store.get_task(scope, task_id).await?;
+        let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
+        let orch = self.flows()?.get_flow(&task.flow_id)?.clone();
+        let caller = task_scope.to_caller_context();
+
+        match orch.resume_waiting(&caller, &task.session_id).await {
+            Ok(()) => {}
+            Err(err) if err.code() == OrchErrorCode::InvalidInput => {
+                return Err(TaskError::invalid_state(err.message()));
+            }
+            Err(err) => return Err(TaskError::from(err)),
+        }
+
+        let updated = self
+            .store
+            .clear_task_waiting(&task.id, "Resuming waiting turn...")
+            .await?
+            .unwrap_or(task);
+        watcher::ensure_task_watcher(Arc::clone(self), updated.clone());
+        Ok(updated)
+    }
+
     /// Đồng bộ trạng thái của một Task với `Orchestrator::result` (dùng khi turn kết thúc hoặc lúc startup recovery).
     pub(crate) async fn settle_or_advance_task(
         self: &Arc<Self>,
@@ -286,6 +315,41 @@ impl SharedTaskCore {
         if let Some(ref turn_id) = task.latest_turn_id {
             let res = orch.result(&caller, &task.session_id, turn_id).await?;
             if res.status == RunStatus::Running {
+                return Ok(false);
+            }
+            if !res.status.is_terminal() {
+                let wait_reason = res
+                    .retry_reason
+                    .as_deref()
+                    .or_else(|| res.error.as_ref().map(|e| e.code.as_str()));
+                let err_code = res.error.as_ref().map(|e| e.code.as_str());
+                let err_msg = res.error.as_ref().map(|e| e.message.as_str());
+                let summary = match (wait_reason, res.next_attempt_at) {
+                    (Some(reason), Some(at)) => format!("Waiting ({reason}), retry at {at}"),
+                    (Some(reason), None) => format!("Waiting for user action ({reason})"),
+                    _ => "Waiting...".to_string(),
+                };
+                let _ = self
+                    .store
+                    .mark_task_waiting(
+                        &task.id,
+                        wait_reason,
+                        res.next_attempt_at,
+                        &summary,
+                        err_code,
+                        err_msg,
+                    )
+                    .await?;
+                self.event_bus.emit(TaskEvent::TaskProgress {
+                    task_id: task.id.clone(),
+                    owner_id: task.owner_id.clone(),
+                    workspace_id: task.workspace_id.clone(),
+                    status: TaskStatus::Waiting,
+                    active_subagent: None,
+                    active_tool: None,
+                    progress_summary: Some(summary),
+                    timestamp_ms: now_ms(),
+                });
                 return Ok(false);
             }
 
@@ -315,6 +379,7 @@ impl SharedTaskCore {
             let preview = res
                 .output
                 .as_deref()
+                .or(res.partial_output.as_deref())
                 .map(|s| clip_preview(s, self.config.runtime.output_preview_chars));
             let err_code = res.error.as_ref().map(|e| e.code.as_str());
             let err_msg = res.error.as_ref().map(|e| e.message.as_str());

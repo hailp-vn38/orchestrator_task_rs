@@ -340,16 +340,18 @@ async fn thinking_blocks_are_stripped_and_empty_thinking_fails_task() {
         .with_description("Daily assistant")
         .with_prompt_path(&prompt_path);
 
+    let mut orch_cfg = OrchestratorConfig::new(
+        test_llm_config(),
+        vec![daily_agent],
+        dir.path().join("daily_store"),
+    );
+    orch_cfg.runtime.max_resume_attempts = 1;
     let daily_orch = Arc::new(
-        Orchestrator::builder(OrchestratorConfig::new(
-            test_llm_config(),
-            vec![daily_agent],
-            dir.path().join("daily_store"),
-        ))
-        .with_gateway(daily_gw)
-        .build()
-        .await
-        .unwrap(),
+        Orchestrator::builder(orch_cfg)
+            .with_gateway(daily_gw)
+            .build()
+            .await
+            .unwrap(),
     );
 
     let task_mgr = task_init
@@ -393,11 +395,132 @@ async fn thinking_blocks_are_stripped_and_empty_thinking_fails_task() {
         {
             if t.id == t2.id {
                 assert_eq!(t.status, TaskStatus::Failed);
-                assert_eq!(t.error_code.as_deref(), Some("PROVIDER_PROTOCOL_ERROR"));
+                assert_eq!(
+                    t.error_code.as_deref(),
+                    Some("RECOVERY_ATTEMPTS_EXHAUSTED")
+                );
+                assert!(
+                    t.error_message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("empty response"),
+                    "{:?}",
+                    t.error_message
+                );
                 break;
             }
         }
     }
+
+    task_mgr.shutdown().await.unwrap();
+    daily_orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_waiting_not_failed() {
+    use orchestrator_agent_rs::test_support::GatewayError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are daily_root.").unwrap();
+
+    let task_cfg =
+        TaskConfig::new(dir.path().join("task_store")).with_default_target("daily", "daily_root");
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    let daily_gw = ScriptedGateway::new();
+    daily_gw.push_error(GatewayError::Timeout);
+    daily_gw.push_text("Hoàn thành sau khi resume từ trạng thái chờ.");
+
+    let daily_agent = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily assistant")
+        .with_prompt_path(&prompt_path);
+
+    let mut llm_cfg = test_llm_config();
+    llm_cfg.providers[0].limits.fast_retries = 0;
+
+    let daily_orch = Arc::new(
+        Orchestrator::builder(OrchestratorConfig::new(
+            llm_cfg,
+            vec![daily_agent],
+            dir.path().join("daily_store"),
+        ))
+        .with_gateway(daily_gw)
+        .build()
+        .await
+        .unwrap(),
+    );
+
+    let task_mgr = task_init
+        .register_flow("daily", daily_orch.clone())
+        .start()
+        .await
+        .unwrap();
+
+    let mut sub = task_mgr.subscribe().unwrap();
+
+    let created = task_mgr
+        .create_task(CreateTaskRequest::new("Job bền", "Chạy qua lỗi timeout"))
+        .await
+        .unwrap();
+
+    let mut saw_waiting_progress = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(TaskFeedItem::Event(ev))) =
+            tokio::time::timeout(Duration::from_millis(100), sub.recv()).await
+        {
+            match ev {
+                TaskEvent::TaskTerminal { task: t } if t.id == created.id => {
+                    panic!("TaskTerminal must NOT be emitted when run enters waiting_retry: {t:?}");
+                }
+                TaskEvent::TaskProgress {
+                    task_id, status, ..
+                } if task_id == created.id && status == TaskStatus::Waiting => {
+                    saw_waiting_progress = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_waiting_progress, "expected TaskProgress with TaskStatus::Waiting");
+
+    let waiting_task = task_mgr.get_task(&created.id).await.unwrap();
+    assert_eq!(waiting_task.status, TaskStatus::Waiting);
+    assert_eq!(
+        waiting_task.wait_reason.as_deref(),
+        Some("PROVIDER_TIMEOUT")
+    );
+    assert!(waiting_task.next_attempt_at.is_some());
+
+    // Khi gọi resume_waiting_task_any_scope -> Task chạy tiếp và phát TaskTerminal(Completed).
+    let resumed = task_mgr
+        .resume_waiting_task_any_scope(&created.id)
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, TaskStatus::Running);
+    assert!(resumed.wait_reason.is_none());
+    assert!(resumed.next_attempt_at.is_none());
+
+    let mut completed_task = None;
+    for _ in 0..30 {
+        if let Ok(Some(TaskFeedItem::Event(TaskEvent::TaskTerminal { task: t }))) =
+            tokio::time::timeout(Duration::from_secs(2), sub.recv()).await
+        {
+            if t.id == created.id {
+                completed_task = Some(t);
+                break;
+            }
+        }
+    }
+    let finished = completed_task.expect("expected TaskTerminal after resume");
+    assert_eq!(finished.status, TaskStatus::Completed);
+    assert_eq!(
+        finished.output_preview.as_deref(),
+        Some("Hoàn thành sau khi resume từ trạng thái chờ.")
+    );
 
     task_mgr.shutdown().await.unwrap();
     daily_orch.shutdown().await.unwrap();

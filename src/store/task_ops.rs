@@ -90,6 +90,8 @@ impl TaskStore {
             progress_summary: row.progress_summary,
             output_preview: None,
             related_wiki_links: row.related_wiki_links,
+            wait_reason: None,
+            next_attempt_at: None,
             error_code: None,
             error_message: None,
             created_at: now,
@@ -138,6 +140,8 @@ impl TaskStore {
                  active_subagent = NULL,
                  active_tool = NULL,
                  progress_summary = ?3,
+                 wait_reason = NULL,
+                 next_attempt_at = NULL,
                  error_code = NULL,
                  error_message = NULL,
                  started_at = COALESCE(started_at, ?4),
@@ -155,6 +159,70 @@ impl TaskStore {
         self.get_task_unscoped(task_id).await
     }
 
+    pub(crate) async fn mark_task_waiting(
+        &self,
+        task_id: &str,
+        wait_reason: Option<&str>,
+        next_attempt_at: Option<i64>,
+        progress_summary: &str,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> TaskResult<Option<TaskView>> {
+        let now = now_ms();
+        sqlx::query(
+            "UPDATE tasks
+             SET status = 'waiting',
+                 active_subagent = NULL,
+                 active_tool = NULL,
+                 progress_summary = ?2,
+                 wait_reason = ?3,
+                 next_attempt_at = ?4,
+                 error_code = ?5,
+                 error_message = ?6,
+                 finished_at = NULL,
+                 updated_at = ?7
+             WHERE id = ?1",
+        )
+        .bind(task_id)
+        .bind(progress_summary)
+        .bind(wait_reason)
+        .bind(next_attempt_at)
+        .bind(error_code)
+        .bind(error_message)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err("mark task waiting"))?;
+        self.get_task_unscoped(task_id).await
+    }
+
+    pub(crate) async fn clear_task_waiting(
+        &self,
+        task_id: &str,
+        progress_summary: &str,
+    ) -> TaskResult<Option<TaskView>> {
+        let now = now_ms();
+        sqlx::query(
+            "UPDATE tasks
+             SET status = 'running',
+                 progress_summary = ?2,
+                 wait_reason = NULL,
+                 next_attempt_at = NULL,
+                 error_code = NULL,
+                 error_message = NULL,
+                 finished_at = NULL,
+                 updated_at = ?3
+             WHERE id = ?1",
+        )
+        .bind(task_id)
+        .bind(progress_summary)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err("clear task waiting"))?;
+        self.get_task_unscoped(task_id).await
+    }
+
     pub(crate) async fn finish_task(
         &self,
         task_id: &str,
@@ -165,6 +233,7 @@ impl TaskStore {
             TaskStatus::Completed => "Completed",
             TaskStatus::Cancelled => "Cancelled",
             TaskStatus::Interrupted => "Interrupted",
+            TaskStatus::Stopped => "Stopped",
             _ => "Failed",
         };
         sqlx::query(
@@ -174,6 +243,8 @@ impl TaskStore {
                  active_tool = NULL,
                  progress_summary = ?3,
                  output_preview = COALESCE(?4, output_preview),
+                 wait_reason = NULL,
+                 next_attempt_at = NULL,
                  error_code = ?5,
                  error_message = ?6,
                  updated_at = ?7,

@@ -61,6 +61,27 @@ impl TaskManager {
             .await
     }
 
+    /// Tiếp tục ngay một Task đang ở trạng thái chờ (`waiting_retry` hoặc `waiting_user`) trong `default_scope`.
+    pub async fn resume_waiting_task(&self, task_id: &str) -> TaskResult<TaskView> {
+        let scope = &self.core.config.default_scope;
+        self.core.resume_waiting_task_internal(scope, task_id).await
+    }
+
+    /// Tiếp tục ngay một Task đang ở trạng thái chờ trong `TaskScope` chỉ định.
+    pub async fn resume_waiting_task_scoped(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+    ) -> TaskResult<TaskView> {
+        self.core.resume_waiting_task_internal(scope, task_id).await
+    }
+
+    /// Tiếp tục ngay một Task đang ở trạng thái chờ bất kể `TaskScope` (phục vụ Admin / Global View).
+    pub async fn resume_waiting_task_any_scope(&self, task_id: &str) -> TaskResult<TaskView> {
+        let scope = self.core.resolve_task_scope(task_id).await?;
+        self.resume_waiting_task_scoped(&scope, task_id).await
+    }
+
     /// Hủy một Task đang chạy trong `default_scope`.
     pub async fn cancel_task(&self, task_id: &str) -> TaskResult<TaskView> {
         let scope = &self.core.config.default_scope;

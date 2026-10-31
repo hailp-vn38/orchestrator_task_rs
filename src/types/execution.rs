@@ -77,7 +77,7 @@ impl TaskExecutionSummary {
                 summary.record_invocation(inv);
             }
             if let Some(ref run) = session.latest_run {
-                if run.status == RunStatus::Running
+                if (run.status == RunStatus::Running || run.status.is_waiting())
                     && !summary.active_agents.contains(&session.agent_id)
                 {
                     summary.active_agents.push(session.agent_id.clone());
@@ -281,12 +281,14 @@ pub struct TaskAgentRunView {
     pub run_id: String,
     pub turn_id: String,
     pub attempt: u32,
-    /// `"running"`, `"completed"`, `"failed"`, `"cancelled"`, `"timed_out"`, `"interrupted"`.
+    /// `"running"`, `"waiting_retry"`, `"waiting_user"`, `"completed"`, `"failed"`, `"cancelled"`, `"timed_out"`, `"interrupted"`.
     pub status: String,
     pub steps: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    pub next_attempt_at: Option<i64>,
+    pub retry_reason: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
 }
@@ -302,6 +304,8 @@ impl TaskAgentRunView {
             input_tokens: run.input_tokens,
             output_tokens: run.output_tokens,
             total_tokens: run.total_tokens(),
+            next_attempt_at: run.next_attempt_at,
+            retry_reason: run.retry_reason.clone(),
             error_code: run.error.as_ref().map(|e| e.code.clone()),
             error_message: run.error.as_ref().map(|e| e.message.clone()),
         }

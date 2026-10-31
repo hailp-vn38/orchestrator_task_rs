@@ -12,10 +12,12 @@ use crate::types::execution::{TaskAgentSessionView, TaskExecutionSummary};
 pub enum TaskStatus {
     Queued,
     Running,
+    Waiting,
     Completed,
     Failed,
     Cancelled,
     Interrupted,
+    Stopped,
 }
 
 impl TaskStatus {
@@ -23,10 +25,12 @@ impl TaskStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Interrupted => "interrupted",
+            Self::Stopped => "stopped",
         }
     }
 
@@ -34,9 +38,11 @@ impl TaskStatus {
         match s {
             "queued" => Self::Queued,
             "running" => Self::Running,
+            "waiting" => Self::Waiting,
             "completed" => Self::Completed,
             "cancelled" => Self::Cancelled,
             "interrupted" => Self::Interrupted,
+            "stopped" => Self::Stopped,
             _ => Self::Failed,
         }
     }
@@ -44,6 +50,7 @@ impl TaskStatus {
     pub fn from_run_status(status: RunStatus) -> Self {
         match status {
             RunStatus::Running => Self::Running,
+            RunStatus::WaitingRetry | RunStatus::WaitingUser => Self::Waiting,
             RunStatus::Completed => Self::Completed,
             RunStatus::Cancelled => Self::Cancelled,
             RunStatus::Interrupted => Self::Interrupted,
@@ -55,7 +62,11 @@ impl TaskStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+            Self::Completed
+                | Self::Failed
+                | Self::Cancelled
+                | Self::Interrupted
+                | Self::Stopped
         )
     }
 }
@@ -169,6 +180,8 @@ pub struct TaskView {
     pub progress_summary: Option<String>,
     pub output_preview: Option<String>,
     pub related_wiki_links: Vec<String>,
+    pub wait_reason: Option<String>,
+    pub next_attempt_at: Option<i64>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub created_at: i64,

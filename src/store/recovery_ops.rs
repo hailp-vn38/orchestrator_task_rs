@@ -8,10 +8,10 @@ use crate::store::TaskStore;
 use crate::types::TaskView;
 
 impl TaskStore {
-    /// Lấy danh sách mọi Task đang ở trạng thái `'queued'` hoặc `'running'` lúc khởi động lại process.
+    /// Lấy danh sách mọi Task đang ở trạng thái `'queued'`, `'running'` hoặc `'waiting'` lúc khởi động lại process.
     pub(crate) async fn list_active_tasks_unscoped(&self) -> TaskResult<Vec<TaskView>> {
         let rows = sqlx::query(
-            "SELECT * FROM tasks WHERE status IN ('queued', 'running') ORDER BY created_at ASC",
+            "SELECT * FROM tasks WHERE status IN ('queued', 'running', 'waiting') ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -29,7 +29,7 @@ impl TaskStore {
     ) -> TaskResult<bool> {
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM tasks
-             WHERE flow_id = ?1 AND (source = 'autoflow' OR agent_id = ?2) AND status IN ('queued', 'running')",
+             WHERE flow_id = ?1 AND (source = 'autoflow' OR agent_id = ?2) AND status IN ('queued', 'running', 'waiting')",
         )
         .bind(flow_id)
         .bind(agent_id)
