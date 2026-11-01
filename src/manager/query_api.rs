@@ -63,13 +63,10 @@ impl TaskManager {
         Ok(self.core.event_bus.subscribe_all())
     }
 
-    /// Lấy thông tin một Task theo `task_id` trong `default_scope`.
-    /// Các nguồn đã bị Auto-Flow cách ly sau nhiều chặng thất bại.
+    /// Các nguồn đang bị Auto-Flow cách ly sau nhiều chặng thất bại.
     pub async fn quarantined_sources(&self) -> TaskResult<Vec<String>> {
-        self.core
-            .store
-            .quarantined_sources(self.core.config.runtime.autoflow_max_source_attempts)
-            .await
+        let engine = self.core.resolve_wiki_engine()?;
+        crate::runtime::autoflow::active_quarantine(&self.core, &engine).await
     }
 
     /// Đưa một nguồn bị cách ly trở lại hàng đợi Auto-Flow. Trả `false` khi nguồn không có bộ đếm.
@@ -82,6 +79,7 @@ impl TaskManager {
         Ok(cleared > 0)
     }
 
+    /// Lấy thông tin một Task theo `task_id` trong `default_scope`.
     pub async fn get_task(&self, task_id: &str) -> TaskResult<TaskView> {
         let scope = &self.core.config.default_scope;
         self.get_task_scoped(scope, task_id).await

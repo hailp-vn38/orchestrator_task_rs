@@ -351,6 +351,11 @@ async fn a_retried_job_learns_from_the_ledger_which_videos_remain() {
                 "add_to_sources",
                 json!({ "topic_folder": "trading/smc", "video_id": "vid-nosub" }),
             ),
+            (
+                "a2b",
+                "add_to_sources",
+                json!({ "topic_folder": "trading/smc", "video_id": "vid-reup" }),
+            ),
         ],
     );
     s.gw.push_text("stopped early");
@@ -396,7 +401,7 @@ async fn a_retried_job_learns_from_the_ledger_which_videos_remain() {
         .find(|t| t.contains("NEXT:"))
         .expect("collection_status output reaches the model");
     assert!(
-        status.contains("TOTAL: 4 | IN_SOURCES: 1 | REMAINING: 2 | NO_TRANSCRIPT: 1 | GAVE_UP: 0"),
+        status.contains("TOTAL: 4 | IN_SOURCES: 1 | DUPLICATE: 1 | REMAINING: 1 | NO_TRANSCRIPT: 1 | GAVE_UP: 0"),
         "{status}"
     );
     assert!(status.contains("video_id=vid-b"), "{status}");
@@ -541,6 +546,22 @@ async fn a_source_that_keeps_failing_is_quarantined_and_the_queue_moves_on() {
 
     assert!(s.mgr.release_quarantined_source(&poison).await.unwrap());
     assert!(s.mgr.quarantined_sources().await.unwrap().is_empty());
+
+    // Giải phóng phải thực sự đưa nguồn trở lại hàng đợi dù chữ ký Vault không đổi.
+    s.gw.push_text("third try");
+    let mut retried = 0;
+    for _ in 0..200 {
+        retried = autoflow_tasks(&s.mgr)
+            .await
+            .iter()
+            .filter(|t| t.prompt.contains("a-poison.md"))
+            .count();
+        if retried == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(retried, 3, "a released source is tried again");
     s.mgr.shutdown().await.unwrap();
 }
 
@@ -621,5 +642,149 @@ async fn an_operator_can_unstick_a_task_whose_write_has_an_unknown_outcome() {
         done.output_preview.as_deref(),
         Some("continued after the operator's verdict")
     );
+    s.mgr.shutdown().await.unwrap();
+}
+
+async fn wait_until_autoflow_settles(s: &Stack, expected_tasks: usize) {
+    for _ in 0..200 {
+        let tasks = autoflow_tasks(&s.mgr).await;
+        if tasks.len() >= expected_tasks && tasks.iter().all(|t| t.status.is_terminal()) {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("autoflow did not reach {expected_tasks} finished tasks");
+}
+
+#[tokio::test]
+async fn a_provider_outage_quarantines_nothing() {
+    let s = stack(
+        TaskRuntimeConfig {
+            autoflow_max_source_attempts: 1,
+            ..fast_runtime()
+        },
+        &[],
+    )
+    .await;
+    write_source(&s.engine, "a");
+    write_source(&s.engine, "b");
+    s.gw.push_error(orchestrator_agent_rs::test_support::GatewayError::NotConfigured);
+    s.notify.notify_one();
+    wait_until_autoflow_settles(&s, 1).await;
+
+    assert!(s.mgr.quarantined_sources().await.unwrap().is_empty());
+    assert_eq!(
+        autoflow_tasks(&s.mgr).await.len(),
+        1,
+        "no hot retry loop while the provider is broken"
+    );
+    s.mgr.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_stage_blames_only_the_source_it_was_working_on() {
+    let s = stack(
+        TaskRuntimeConfig {
+            autoflow_max_source_attempts: 1,
+            autoflow_batch_size: 2,
+            ..fast_runtime()
+        },
+        &[],
+    )
+    .await;
+    write_source(&s.engine, "a");
+    write_source(&s.engine, "b");
+    s.gw.push_errors(
+        4,
+        orchestrator_agent_rs::test_support::GatewayError::ContextOverflow,
+    );
+    s.gw.push_text("b could not be ingested either");
+    s.notify.notify_one();
+    wait_until_autoflow_settles(&s, 2).await;
+
+    let quarantined = s.mgr.quarantined_sources().await.unwrap();
+    assert!(
+        quarantined.contains(&"sources/trading/smc/a.md".to_string()),
+        "{quarantined:?}"
+    );
+    let first_task = autoflow_tasks(&s.mgr)
+        .await
+        .into_iter()
+        .find(|t| t.status == TaskStatus::Failed)
+        .expect("the overflow fails the first stage");
+    assert_eq!(first_task.error_code.as_deref(), Some("CONTEXT_LIMIT"));
+    s.mgr.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn rewriting_a_quarantined_source_releases_it() {
+    let s = stack(
+        TaskRuntimeConfig {
+            autoflow_max_source_attempts: 1,
+            ..fast_runtime()
+        },
+        &[],
+    )
+    .await;
+    write_source(&s.engine, "poison");
+    s.gw.push_text("could not ingest");
+    s.notify.notify_one();
+    wait_until_autoflow_settles(&s, 1).await;
+    assert_eq!(s.mgr.quarantined_sources().await.unwrap().len(), 1);
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    write_source(&s.engine, "poison");
+    assert!(s.mgr.quarantined_sources().await.unwrap().is_empty());
+    s.mgr.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn force_on_markdown_keeps_the_path_and_never_overwrites_other_content() {
+    let s = stack_with_tool(fast_runtime(), &["add_to_sources"], None, false).await;
+    let body = "Nội dung đủ dài cho một bản tổng hợp, không chứa gì đặc biệt.";
+    let save = |id: &'static str, title: &str, stem: &str, body: &str, force: bool| {
+        (
+            id,
+            "add_to_sources",
+            json!({
+                "topic_folder": "trading/smc",
+                "title": title,
+                "file_stem": stem,
+                "markdown_body": body,
+                "provenance": "user",
+                "force": force,
+            }),
+        )
+    };
+    s.gw.push_tool_calls(
+        "",
+        vec![
+            save("m1", "Tên một", "note", body, false),
+            // Cùng nội dung, tên khác, force: ghi lại đúng file cũ.
+            save("m2", "Tên hai", "note-renamed", body, true),
+            // Nội dung khác, cùng tên file, force: không được đè file cũ.
+            save(
+                "m3",
+                "Tên ba",
+                "note",
+                "Một nội dung hoàn toàn khác với nội dung trước đó.",
+                true,
+            ),
+        ],
+    );
+    s.gw.push_text("done");
+    let task = s
+        .mgr
+        .create_task(CreateTaskRequest::new("Save", "save notes"))
+        .await
+        .unwrap();
+    wait_terminal(&s.mgr, &task.id).await;
+
+    assert_eq!(s.engine.status().unwrap().sources_count, 2);
+    let original =
+        std::fs::read_to_string(s.engine.config().sources_dir().join("trading/smc/note.md"))
+            .unwrap();
+    assert!(original.contains("đủ dài"), "{original}");
     s.mgr.shutdown().await.unwrap();
 }

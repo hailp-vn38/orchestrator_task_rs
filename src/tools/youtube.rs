@@ -18,10 +18,12 @@ use orchestrator_agent_rs::{
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
-use crate::store::{CollectionItemRow, TaskStore, ITEM_FAILED, ITEM_NO_TRANSCRIPT, ITEM_SAVED};
+use crate::store::{
+    CollectionItemRow, TaskStore, ITEM_DUPLICATE, ITEM_FAILED, ITEM_NO_TRANSCRIPT, ITEM_SAVED,
+};
 use crate::tools::source_identity::{
-    content_sha256, ingest_status_label, stem_free_of_collision, ExistingReason, SaveSourceOutcome,
-    CONTENT_HASH_KEY, VIDEO_ID_KEY,
+    content_sha256, ingest_status_label, split_scoped_path, stem_free_of_collision, ExistingReason,
+    SaveSourceOutcome, CONTENT_HASH_KEY, VIDEO_ID_KEY,
 };
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
@@ -179,19 +181,7 @@ impl YoutubeCollectorEnv {
         {
             return Ok(cached);
         }
-        let transcript = match self.fetch_transcript(video_id).await {
-            Ok(transcript) => transcript,
-            Err(error) => {
-                let status = if error.code == "NO_TRANSCRIPT" {
-                    ITEM_NO_TRANSCRIPT
-                } else {
-                    ITEM_FAILED
-                };
-                self.record_outcome(video_id, status, None, Some(&error.message))
-                    .await;
-                return Err(error);
-            }
-        };
+        let transcript = self.fetch_transcript(video_id).await?;
         self.transcripts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -259,11 +249,24 @@ impl YoutubeCollectorEnv {
             .or(known_title)
             .unwrap_or_else(|| video_id.to_string());
 
-        let transcript = self.get_or_fetch_transcript(video_id).await?;
+        // Chỉ lần lưu mới tính vào sổ: đọc transcript để tóm tắt không phải là bước thu thập.
+        let transcript = match self.get_or_fetch_transcript(video_id).await {
+            Ok(transcript) => transcript,
+            Err(error) => {
+                let status = if error.code == "NO_TRANSCRIPT" {
+                    ITEM_NO_TRANSCRIPT
+                } else {
+                    ITEM_FAILED
+                };
+                self.record_outcome(video_id, status, None, Some(&error.message))
+                    .await;
+                return Err(error);
+            }
+        };
         let content_hash = content_sha256(&transcript);
         if !force {
             if let Some(found) = self.find_source(CONTENT_HASH_KEY, &content_hash)? {
-                self.record_outcome(video_id, ITEM_SAVED, Some(&found.scoped_path), None)
+                self.record_outcome(video_id, ITEM_DUPLICATE, Some(&found.scoped_path), None)
                     .await;
                 return Ok(SaveSourceOutcome::Existing {
                     found,
@@ -482,18 +485,11 @@ fn collect_vtts(dir: &Path) -> Result<Vec<PathBuf>, ToolError> {
         .collect())
 }
 
-fn split_scoped_path(scoped_path: &str) -> (String, String) {
-    let clean = scoped_path.trim_end_matches(".md");
-    match clean.rsplit_once('/') {
-        Some((folder, stem)) => (folder.to_string(), stem.to_string()),
-        None => (String::new(), clean.to_string()),
-    }
-}
-
 /// Trạng thái playlist trả cho agent: đủ để một session mới biết phải làm tiếp video nào.
 struct CollectionReport {
     total: usize,
     in_sources: usize,
+    duplicates: usize,
     no_transcript: usize,
     gave_up: usize,
     remaining: usize,
@@ -510,6 +506,7 @@ impl CollectionReport {
         let mut report = Self {
             total: items.len(),
             in_sources: 0,
+            duplicates: 0,
             no_transcript: 0,
             gave_up: 0,
             remaining: 0,
@@ -520,6 +517,9 @@ impl CollectionReport {
             let status = if let Some(found) = in_vault.get(&item.item_id) {
                 report.in_sources += 1;
                 ingest_status_label(found.ingest_state).to_string()
+            } else if item.status == ITEM_DUPLICATE {
+                report.duplicates += 1;
+                "duplicate_of".to_string()
             } else if item.status == ITEM_NO_TRANSCRIPT {
                 report.no_transcript += 1;
                 "no_transcript".to_string()
@@ -545,8 +545,13 @@ impl CollectionReport {
 
     fn summary(&self) -> String {
         format!(
-            "TOTAL: {} | IN_SOURCES: {} | REMAINING: {} | NO_TRANSCRIPT: {} | GAVE_UP: {}",
-            self.total, self.in_sources, self.remaining, self.no_transcript, self.gave_up
+            "TOTAL: {} | IN_SOURCES: {} | DUPLICATE: {} | REMAINING: {} | NO_TRANSCRIPT: {} | GAVE_UP: {}",
+            self.total,
+            self.in_sources,
+            self.duplicates,
+            self.remaining,
+            self.no_transcript,
+            self.gave_up
         )
     }
 }
@@ -580,7 +585,7 @@ impl HostTool for YtListPlaylistTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "yt_list_playlist".to_string(),
-            description: "List all videos in a YouTube playlist URL using yt-dlp and record them in the collection ledger. Returns `index`, `video_id`, `file_stem`, `status` (new, failed, no_transcript, gave_up, pending_ingest, already_ingested) and `title`, so the agent can skip videos already in `sources/` and choose a topic folder (`<domain>/<topic>`).".to_string(),
+            description: "List all videos in a YouTube playlist URL using yt-dlp and record them in the collection ledger. Returns `index`, `video_id`, `file_stem`, `status` (new, failed, no_transcript, gave_up, duplicate_of, pending_ingest, already_ingested) and `title`, so the agent can skip videos already in `sources/` and choose a topic folder (`<domain>/<topic>`).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["url"],
@@ -837,6 +842,7 @@ impl HostTool for CollectionStatusTool {
             json!({
                 "total": report.total,
                 "in_sources": report.in_sources,
+                "duplicates": report.duplicates,
                 "remaining": report.remaining,
                 "no_transcript": report.no_transcript,
                 "gave_up": report.gave_up,

@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use crate::tools::source_identity::{
-    content_sha256, existing_source_tool_outcome, stem_free_of_collision, ExistingReason,
-    SaveSourceOutcome, CONTENT_HASH_KEY,
+    content_sha256, existing_source_tool_outcome, resolve_content_target, ContentTarget,
+    ExistingReason, SaveSourceOutcome, CONTENT_HASH_KEY,
 };
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
@@ -190,29 +190,16 @@ impl SharedPdfState {
             .unwrap_or_else(|| doc.file_stem.clone());
 
         let content_hash = content_sha256(&doc.markdown);
-        if !force {
-            let known = self
-                .engine
-                .find_source_by_frontmatter(CONTENT_HASH_KEY, &content_hash)
-                .map_err(|e| host_tool_err("WIKI_SOURCE_LOOKUP_FAILED", e.to_string()))?;
-            if let Some(found) = known {
-                return Ok(SaveSourceOutcome::Existing {
-                    found,
-                    reason: ExistingReason::SameIdentity,
-                });
-            }
-        }
-        let stem = if force {
-            stem
-        } else {
-            stem_free_of_collision(
-                &self.engine,
-                &topic_folder,
-                &stem,
-                (CONTENT_HASH_KEY, &content_hash),
-                &content_hash[..12],
-            )
-        };
+        let (topic_folder, stem) =
+            match resolve_content_target(&self.engine, topic_folder, stem, &content_hash, force)? {
+                ContentTarget::Existing(found) => {
+                    return Ok(SaveSourceOutcome::Existing {
+                        found,
+                        reason: ExistingReason::SameIdentity,
+                    });
+                }
+                ContentTarget::Write { topic_folder, stem } => (topic_folder, stem),
+            };
 
         let mut tags = vec!["pdf".to_string(), "anydoc".to_string()];
         for clean in user_tags {

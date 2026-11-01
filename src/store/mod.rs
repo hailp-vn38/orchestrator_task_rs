@@ -19,7 +19,9 @@ mod task_ops;
 mod task_query;
 
 pub(crate) use codec::{new_id, now_ms};
-pub(crate) use collection_ops::{CollectionItemRow, ITEM_FAILED, ITEM_NO_TRANSCRIPT, ITEM_SAVED};
+pub(crate) use collection_ops::{
+    CollectionItemRow, ITEM_DUPLICATE, ITEM_FAILED, ITEM_NO_TRANSCRIPT, ITEM_SAVED,
+};
 pub(crate) use schedule_ops::NewScheduleRow;
 pub(crate) use task_ops::{NewTaskRow, ProgressUpdate, TerminalUpdate};
 

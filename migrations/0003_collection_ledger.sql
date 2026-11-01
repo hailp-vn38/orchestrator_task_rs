@@ -4,7 +4,7 @@ CREATE TABLE collection_items (
     item_id TEXT NOT NULL,
     position INTEGER NOT NULL,
     title TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'saved', 'no_transcript', 'failed')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'saved', 'duplicate', 'no_transcript', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0,
     source_path TEXT,
     last_error TEXT,

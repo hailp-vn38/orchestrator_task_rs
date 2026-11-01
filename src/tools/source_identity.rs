@@ -4,11 +4,11 @@
 use llm_wiki::{
     parse_frontmatter, SourceIngestState, SourceMatch, WikiEngine, WriteTopicSourceResponse,
 };
-use orchestrator_agent_rs::{ToolContext, ToolOutcome};
+use orchestrator_agent_rs::{ToolContext, ToolError, ToolOutcome};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::tools::wiki_bridge::host_tool_outcome;
+use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
 pub(crate) const CONTENT_HASH_KEY: &str = "content_sha256";
 pub(crate) const VIDEO_ID_KEY: &str = "video_id";
@@ -70,6 +70,51 @@ pub(crate) fn stem_free_of_collision(
         stem.to_string()
     } else {
         format!("{stem}-{suffix}")
+    }
+}
+
+/// Nơi lưu một nguồn được nhận ra theo nội dung.
+pub(crate) enum ContentTarget {
+    Existing(SourceMatch),
+    Write { topic_folder: String, stem: String },
+}
+
+/// Quyết định nơi lưu nội dung mới: cùng nội dung thì báo đã có, hoặc ghi lại đúng đường dẫn cũ khi
+/// `force`; nội dung khác không bao giờ ghi đè nguồn đang dùng cùng tên file.
+pub(crate) fn resolve_content_target(
+    engine: &WikiEngine,
+    topic_folder: String,
+    stem: String,
+    content_hash: &str,
+    force: bool,
+) -> Result<ContentTarget, ToolError> {
+    let known = engine
+        .find_source_by_frontmatter(CONTENT_HASH_KEY, content_hash)
+        .map_err(|e| host_tool_err("WIKI_SOURCE_LOOKUP_FAILED", e.to_string()))?;
+    Ok(match known {
+        Some(found) if !force => ContentTarget::Existing(found),
+        Some(found) => {
+            let (topic_folder, stem) = split_scoped_path(&found.scoped_path);
+            ContentTarget::Write { topic_folder, stem }
+        }
+        None => {
+            let stem = stem_free_of_collision(
+                engine,
+                &topic_folder,
+                &stem,
+                (CONTENT_HASH_KEY, content_hash),
+                &content_hash[..12],
+            );
+            ContentTarget::Write { topic_folder, stem }
+        }
+    })
+}
+
+pub(crate) fn split_scoped_path(scoped_path: &str) -> (String, String) {
+    let clean = scoped_path.trim_end_matches(".md");
+    match clean.rsplit_once('/') {
+        Some((folder, stem)) => (folder.to_string(), stem.to_string()),
+        None => (String::new(), clean.to_string()),
     }
 }
 

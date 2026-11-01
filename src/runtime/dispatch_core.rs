@@ -499,10 +499,13 @@ impl SharedTaskCore {
                 return Ok(false);
             }
 
-            let is_budget_exhausted = res.status != RunStatus::Cancelled
-                && res.error.as_ref().is_some_and(|e| {
-                    e.code == CODE_BUDGET_EXHAUSTED || e.code == CODE_STEP_LIMIT_REACHED
-                });
+            let stop_code = res
+                .error
+                .as_ref()
+                .filter(|_| res.status != RunStatus::Cancelled)
+                .map(|e| e.code.as_str());
+            let is_budget_exhausted = stop_code == Some(CODE_BUDGET_EXHAUSTED);
+            let is_step_limited = stop_code == Some(CODE_STEP_LIMIT_REACHED);
 
             // Nếu turn vừa hoàn tất bình thường và có followup đang chờ trong hàng đợi -> tự động submit followup kế tiếp!
             if res.status == RunStatus::Completed && !is_budget_exhausted {
@@ -534,7 +537,7 @@ impl SharedTaskCore {
                 }
             }
 
-            let status = if is_budget_exhausted {
+            let status = if is_budget_exhausted || is_step_limited {
                 TaskStatus::Stopped
             } else {
                 TaskStatus::from_run_status(res.status)

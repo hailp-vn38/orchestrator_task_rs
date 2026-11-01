@@ -16,6 +16,7 @@
 //!    với `last_attempted_signature` để không tự kích hoạt vòng lặp kiểm toán vô tận khi Vault không đổi.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use llm_wiki::{AutoflowPlanOptions, WikiEngine};
 use tokio::sync::Notify;
@@ -38,6 +39,8 @@ pub(crate) struct AutoflowVaultSignature {
     pub total_chunks: usize,
     pub total_graph_links: usize,
     pub uningested_sources: Vec<String>,
+    /// Nguồn ingest dở, kèm việc nguồn có mới hơn trang tóm tắt hay không.
+    pub incomplete_ingests: Vec<(String, bool)>,
     pub unsynthesized_topics: Vec<String>,
     pub broken_links: Vec<(String, String, usize)>,
     pub orphan_wiki_pages: Vec<String>,
@@ -59,6 +62,13 @@ impl AutoflowVaultSignature {
             .map(|s| s.source_rel_path.clone())
             .collect();
         uningested_sources.sort();
+
+        let mut incomplete_ingests: Vec<(String, bool)> = lint
+            .incomplete_ingests
+            .iter()
+            .map(|i| (i.source_rel_path.clone(), i.source_updated))
+            .collect();
+        incomplete_ingests.sort();
 
         let mut broken_links: Vec<(String, String, usize)> = lint
             .broken_links
@@ -85,6 +95,7 @@ impl AutoflowVaultSignature {
             total_chunks: status.total_chunks,
             total_graph_links: status.total_graph_links,
             uningested_sources,
+            incomplete_ingests,
             unsynthesized_topics,
             broken_links,
             orphan_wiki_pages,
@@ -135,58 +146,113 @@ impl WikiAutoFlowBinding {
     }
 }
 
-/// Đối chiếu các nguồn chặng vừa nhận với trạng thái Vault. Trả `true` khi còn nguồn dở, tức chữ ký
-/// Vault không đổi vẫn được phép chạy lại (có giới hạn bởi `autoflow_max_source_attempts`).
+/// Chờ lâu thế này trước khi thử lại chặng thất bại vì provider, để cấu hình đã sửa có tác dụng mà
+/// không cần restart và cũng không tạo Task liên tục khi provider còn lỗi.
+const PROVIDER_FAULT_RETRY_DELAY: Duration = Duration::from_secs(30 * 60);
+
+/// Việc Auto-Flow cần làm sau khi đối chiếu một chặng với trạng thái Vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageSettlement {
+    /// Không cần thử lại ngoài cơ chế chữ ký Vault.
+    Settled,
+    /// Có nguồn bị tính lỗi: chữ ký Vault không đổi vẫn được phép chạy lại, số lần có giới hạn.
+    RetrySources,
+    /// Provider lỗi, không phải nguồn: không tính lỗi cho nguồn nào, thử lại sau một khoảng chờ.
+    RetryAfterProviderFault,
+}
+
+fn is_provider_fault(error_code: Option<&str>) -> bool {
+    error_code.is_some_and(|code| {
+        code.starts_with("PROVIDER_")
+            || code.starts_with("MODEL_")
+            || code == "RECOVERY_ATTEMPTS_EXHAUSTED"
+    })
+}
+
 async fn settle_ingest_batch(
     core: &SharedTaskCore,
     engine: &WikiEngine,
     task_id: &str,
     batch: &[String],
-    quarantined: &[String],
     terminal_status: Option<TaskStatus>,
-) -> bool {
+    terminal_error: Option<&str>,
+) -> StageSettlement {
     let Ok(lint) = engine.lint_wiki() else {
-        return false;
+        return StageSettlement::Settled;
     };
-    let is_pending = |path: &String| {
-        lint.uningested_sources
-            .iter()
-            .any(|s| &s.source_rel_path == path)
-            || lint
-                .incomplete_ingests
-                .iter()
-                .any(|i| &i.source_rel_path == path)
-    };
-    // Nguồn bị cách ly mà nay đã đủ trang (ví dụ agent hoặc người khác đã ingest) thì tự ra khỏi cách ly.
-    let finished: Vec<String> = batch
+    let (unfinished, finished): (Vec<String>, Vec<String>) = batch
         .iter()
-        .chain(quarantined)
-        .filter(|path| !is_pending(path))
         .cloned()
-        .collect();
+        .partition(|path| lint.is_source_pending(path));
     if let Err(e) = core.store.clear_source_ingest_attempts(&finished).await {
         warn!("autoflow could not clear ingest attempts: {e}");
     }
-    let unfinished: Vec<String> = batch.iter().filter(|p| is_pending(p)).cloned().collect();
-    // Dừng vì hết ngân sách, bị hủy hay shutdown không nói gì về việc nguồn có lỗi hay không.
-    if unfinished.is_empty()
-        || !matches!(
-            terminal_status,
-            Some(TaskStatus::Completed | TaskStatus::Failed)
-        )
-    {
-        return false;
-    }
+    let Some(head) = unfinished.first().cloned() else {
+        return StageSettlement::Settled;
+    };
+    // Task xử lý nguồn tuần tự: khi chặng hỏng giữa chừng thì chỉ nguồn đầu tiên còn dở mới thực sự
+    // đã được thử, các nguồn sau không bị tính lỗi thay.
+    let blamed = match terminal_status {
+        Some(TaskStatus::Completed) => unfinished,
+        Some(TaskStatus::Failed) if is_provider_fault(terminal_error) => {
+            warn!(task_id, code = ?terminal_error, "autoflow stage failed on the provider");
+            return StageSettlement::RetryAfterProviderFault;
+        }
+        Some(TaskStatus::Failed) => vec![head],
+        Some(TaskStatus::Stopped) if finished.is_empty() => vec![head],
+        _ => return StageSettlement::Settled,
+    };
     if let Err(e) = core
         .store
-        .bump_source_ingest_attempts(&unfinished, task_id)
+        .bump_source_ingest_attempts(&blamed, task_id)
         .await
     {
         warn!("autoflow could not record ingest attempts: {e}");
-        return false;
+        return StageSettlement::Settled;
     }
-    warn!(task_id, sources = ?unfinished, "autoflow stage left sources unfinished");
-    true
+    warn!(task_id, sources = ?blamed, "autoflow stage left sources unfinished");
+    StageSettlement::RetrySources
+}
+
+/// Danh sách cách ly hiện hành. Nguồn đã đủ trang, hoặc file đã đổi sau lần lỗi cuối (ví dụ lưu lại
+/// bằng `force`), không còn lý do để bị cách ly nên tự ra khỏi danh sách.
+pub(crate) async fn active_quarantine(
+    core: &SharedTaskCore,
+    engine: &WikiEngine,
+) -> crate::error::TaskResult<Vec<String>> {
+    let entries = core
+        .store
+        .quarantine_entries(core.config.runtime.autoflow_max_source_attempts)
+        .await?;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Ok(lint) = engine.lint_wiki() else {
+        return Ok(entries.into_iter().map(|(path, _)| path).collect());
+    };
+    let mut active = Vec::new();
+    let mut released = Vec::new();
+    for (path, failed_at_ms) in entries {
+        let changed_since_failure =
+            source_modified_ms(engine, &path).is_some_and(|modified_ms| modified_ms > failed_at_ms);
+        if lint.is_source_pending(&path) && !changed_since_failure {
+            active.push(path);
+        } else {
+            released.push(path);
+        }
+    }
+    core.store.clear_source_ingest_attempts(&released).await?;
+    Ok(active)
+}
+
+fn source_modified_ms(engine: &WikiEngine, source_rel_path: &str) -> Option<i64> {
+    let scoped = source_rel_path.strip_prefix("sources/")?;
+    let modified = std::fs::metadata(engine.config().sources_dir().join(scoped))
+        .ok()?
+        .modified()
+        .ok()?;
+    let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(since_epoch.as_millis()).ok()
 }
 
 pub(crate) fn spawn_autoflow_loop(
@@ -201,6 +267,8 @@ pub(crate) fn spawn_autoflow_loop(
             .unwrap_or_else(|| core.config.default_scope.clone());
         let target_key = format!("{}/{}", binding.flow_id, binding.agent_id);
         let mut last_attempted_signature: Option<AutoflowVaultSignature> = None;
+        let mut last_quarantine: Option<Vec<String>> = None;
+        let mut retry_at: Option<tokio::time::Instant> = None;
 
         loop {
             if core.shutdown.is_cancelled() {
@@ -280,12 +348,18 @@ pub(crate) fn spawn_autoflow_loop(
                     }
                 }
 
-                let max_source_attempts = core.config.runtime.autoflow_max_source_attempts;
-                let quarantined = core
-                    .store
-                    .quarantined_sources(max_source_attempts)
+                let quarantined = active_quarantine(&core, &binding.engine)
                     .await
                     .unwrap_or_default();
+                // Danh sách cách ly đổi nghĩa là hàng đợi đổi, dù chữ ký Vault giữ nguyên.
+                if last_quarantine.as_ref() != Some(&quarantined) {
+                    last_attempted_signature = None;
+                    last_quarantine = Some(quarantined.clone());
+                }
+                if retry_at.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                    last_attempted_signature = None;
+                    retry_at = None;
+                }
                 let plan = binding.engine.plan_next_autoflow(
                     None,
                     &AutoflowPlanOptions {
@@ -346,17 +420,14 @@ pub(crate) fn spawn_autoflow_loop(
                         debug!(task_id = %task.id, "spawned managed autoflow task");
                         // Đợi Watcher báo Task Auto-Flow này thực sự đạt trạng thái terminal
                         let mut terminal_status = None;
+                        let mut terminal_error = None;
                         loop {
-                            let current_status = core
-                                .store
-                                .get_task_unscoped(&task.id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .map(|t| t.status);
-                            match current_status {
-                                Some(st) if st.is_terminal() => {
-                                    terminal_status = Some(st);
+                            let current =
+                                core.store.get_task_unscoped(&task.id).await.ok().flatten();
+                            match current {
+                                Some(t) if t.status.is_terminal() => {
+                                    terminal_status = Some(t.status);
+                                    terminal_error = t.error_code;
                                     break;
                                 }
                                 None => break,
@@ -375,19 +446,22 @@ pub(crate) fn spawn_autoflow_loop(
                         let _ = binding.engine.embed_pending(false);
                         let _ = binding.engine.rebuild_or_sync_index_md();
 
-                        // Nguồn còn dở sau chặng được tính một lần thất bại và được thử lại; đủ số lần
-                        // thì bị cách ly để không chặn hàng đợi và chặng tổng hợp.
-                        if settle_ingest_batch(
+                        match settle_ingest_batch(
                             &core,
                             &binding.engine,
                             &task.id,
                             &ingest_batch,
-                            &quarantined,
                             terminal_status,
+                            terminal_error.as_deref(),
                         )
                         .await
                         {
-                            last_attempted_signature = None;
+                            StageSettlement::Settled => {}
+                            StageSettlement::RetrySources => last_attempted_signature = None,
+                            StageSettlement::RetryAfterProviderFault => {
+                                retry_at =
+                                    Some(tokio::time::Instant::now() + PROVIDER_FAULT_RETRY_DELAY);
+                            }
                         }
 
                         // Nếu Task bị Failed hoặc Cancelled, không tự động chạy tiếp chặng kế tiếp

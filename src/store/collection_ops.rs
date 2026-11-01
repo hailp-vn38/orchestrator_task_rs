@@ -7,6 +7,7 @@ use crate::store::codec::{db_err, now_ms};
 use crate::store::TaskStore;
 
 pub(crate) const ITEM_SAVED: &str = "saved";
+pub(crate) const ITEM_DUPLICATE: &str = "duplicate";
 pub(crate) const ITEM_NO_TRANSCRIPT: &str = "no_transcript";
 pub(crate) const ITEM_FAILED: &str = "failed";
 
@@ -126,17 +127,23 @@ impl TaskStore {
         Ok(row.map(|r| (r.get("title"), r.get("collection_key"), r.get("position"))))
     }
 
-    /// Nguồn đã thất bại đủ `max_attempts` chặng: bị loại khỏi hàng đợi cho tới khi được giải phóng.
-    pub(crate) async fn quarantined_sources(&self, max_attempts: u32) -> TaskResult<Vec<String>> {
+    /// Nguồn đã thất bại đủ `max_attempts` chặng, kèm thời điểm thất bại gần nhất (ms).
+    pub(crate) async fn quarantine_entries(
+        &self,
+        max_attempts: u32,
+    ) -> TaskResult<Vec<(String, i64)>> {
         let rows = sqlx::query(
-            "SELECT source_rel_path FROM source_ingest_attempts
+            "SELECT source_rel_path, updated_at_ms FROM source_ingest_attempts
              WHERE attempts >= ?1 ORDER BY source_rel_path ASC",
         )
         .bind(i64::from(max_attempts))
         .fetch_all(&self.pool)
         .await
         .map_err(db_err("list quarantined sources"))?;
-        Ok(rows.iter().map(|r| r.get("source_rel_path")).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("source_rel_path"), r.get("updated_at_ms")))
+            .collect())
     }
 
     /// Tăng số lần thất bại của các nguồn một chặng đã nhận nhưng chưa ingest xong.

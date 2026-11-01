@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use crate::tools::source_identity::{
-    content_sha256, existing_source_tool_outcome, stem_free_of_collision, ExistingReason,
-    SaveSourceOutcome, CONTENT_HASH_KEY,
+    content_sha256, existing_source_tool_outcome, resolve_content_target, ContentTarget,
+    ExistingReason, SaveSourceOutcome, CONTENT_HASH_KEY,
 };
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
@@ -415,29 +415,21 @@ impl HostTool for AddToSourcesTool {
             .unwrap_or_default();
 
         let content_hash = content_sha256(body);
-        if !force {
-            let known = self
-                .engine
-                .find_source_by_frontmatter(CONTENT_HASH_KEY, &content_hash)
-                .map_err(|e| host_tool_err("WIKI_SOURCE_LOOKUP_FAILED", e.to_string()))?;
-            if let Some(found) = known {
+        let (topic_folder, file_stem) = match resolve_content_target(
+            &self.engine,
+            topic_folder,
+            file_stem,
+            &content_hash,
+            force,
+        )? {
+            ContentTarget::Existing(found) => {
                 return Ok(existing_source_tool_outcome(
                     &ctx,
                     &found,
                     ExistingReason::SameIdentity,
                 ));
             }
-        }
-        let file_stem = if force {
-            file_stem
-        } else {
-            stem_free_of_collision(
-                &self.engine,
-                &topic_folder,
-                &file_stem,
-                (CONTENT_HASH_KEY, &content_hash),
-                &content_hash[..12],
-            )
+            ContentTarget::Write { topic_folder, stem } => (topic_folder, stem),
         };
 
         let mut extra_frontmatter = vec![
