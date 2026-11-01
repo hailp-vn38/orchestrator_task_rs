@@ -53,6 +53,10 @@ impl TaskManagerInit {
         build_task_host_tools(Arc::clone(&self.core))
     }
 
+    pub(crate) fn collection_ledger(&self) -> crate::store::TaskStore {
+        self.core.store.clone()
+    }
+
     /// Xuất 4 `HostTool` (`reminder_create`, `reminder_list`, `reminder_complete`, `reminder_delete`)
     /// để đăng ký vào `daily_orch` (Flow 1) trước khi gọi `OrchestratorBuilder::build()`.
     pub fn reminder_host_tools(&self) -> Vec<Arc<dyn HostTool>> {

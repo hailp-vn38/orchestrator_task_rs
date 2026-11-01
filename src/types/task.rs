@@ -340,3 +340,27 @@ pub struct WikiDeleteOutcome {
     /// `true` nếu trang tóm tắt đối ứng trong `wiki/sources/...` cũng đã được xóa.
     pub mirrored_wiki_deleted: bool,
 }
+
+/// Kết luận đã được người vận hành xác minh cho một tool không rõ kết quả.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StuckToolDecision {
+    /// Tool không để lại tác dụng nào; agent thấy một lỗi kỹ thuật và tự quyết định bước tiếp.
+    NoEffect { evidence: String },
+    /// Tool đã hoàn tất; `result_text` trở thành kết quả tool mà agent nhận được.
+    Completed {
+        tool_call_id: String,
+        result_text: String,
+        evidence: String,
+    },
+}
+
+/// Yêu cầu đối soát một tool bị kẹt của Task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveStuckTool {
+    pub task_id: String,
+    /// Session con khi tool thuộc subagent; `None` là session gốc của Task.
+    pub session_id: Option<String>,
+    pub invocation_id: String,
+    pub operator_id: String,
+    pub decision: StuckToolDecision,
+}

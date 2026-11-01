@@ -133,6 +133,13 @@ pub struct TaskRuntimeConfig {
     pub output_preview_chars: usize,
     /// Thời gian chờ các worker dừng hẳn khi gọi `TaskManager::shutdown()`.
     pub shutdown_grace: Duration,
+    /// Số nguồn tối đa mỗi chặng Auto-Flow nhận. Nhỏ hơn `steps` của Agent Auto-Flow để chặng xong
+    /// trọn vẹn, mỗi chặng có ngân sách riêng.
+    pub autoflow_batch_size: usize,
+    /// Số chặng một nguồn được phép thất bại trước khi bị cách ly khỏi hàng đợi.
+    pub autoflow_max_source_attempts: u32,
+    /// Auto-Flow chờ các Task đang có thể ghi `sources/` tối đa bao lâu trước khi tự chạy.
+    pub autoflow_collection_wait_max: Duration,
 }
 
 impl Default for TaskRuntimeConfig {
@@ -144,6 +151,9 @@ impl Default for TaskRuntimeConfig {
             page_size: 50,
             output_preview_chars: 2000,
             shutdown_grace: Duration::from_secs(15),
+            autoflow_batch_size: 10,
+            autoflow_max_source_attempts: 3,
+            autoflow_collection_wait_max: Duration::from_secs(2 * 3600),
         }
     }
 }
@@ -167,6 +177,14 @@ impl TaskRuntimeConfig {
         }
         if self.shutdown_grace.is_zero() {
             return Err(TaskError::config("shutdown_grace must be > 0"));
+        }
+        if self.autoflow_batch_size == 0 {
+            return Err(TaskError::config("autoflow_batch_size must be > 0"));
+        }
+        if self.autoflow_max_source_attempts == 0 {
+            return Err(TaskError::config(
+                "autoflow_max_source_attempts must be > 0",
+            ));
         }
         Ok(())
     }

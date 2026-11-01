@@ -36,6 +36,8 @@ pub(crate) fn test_llm_config() -> LlmConfig {
 mod asr_transcribe;
 #[path = "integration/autoflow_and_toolkit.rs"]
 mod autoflow_and_toolkit;
+#[path = "integration/collection_batch.rs"]
+mod collection_batch;
 #[path = "integration/media_artifacts.rs"]
 mod media_artifacts;
 #[path = "integration/scope_and_watcher.rs"]

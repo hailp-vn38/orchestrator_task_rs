@@ -64,6 +64,24 @@ impl TaskManager {
     }
 
     /// Lấy thông tin một Task theo `task_id` trong `default_scope`.
+    /// Các nguồn đã bị Auto-Flow cách ly sau nhiều chặng thất bại.
+    pub async fn quarantined_sources(&self) -> TaskResult<Vec<String>> {
+        self.core
+            .store
+            .quarantined_sources(self.core.config.runtime.autoflow_max_source_attempts)
+            .await
+    }
+
+    /// Đưa một nguồn bị cách ly trở lại hàng đợi Auto-Flow. Trả `false` khi nguồn không có bộ đếm.
+    pub async fn release_quarantined_source(&self, source_rel_path: &str) -> TaskResult<bool> {
+        let cleared = self
+            .core
+            .store
+            .clear_source_ingest_attempts(&[source_rel_path.to_string()])
+            .await?;
+        Ok(cleared > 0)
+    }
+
     pub async fn get_task(&self, task_id: &str) -> TaskResult<TaskView> {
         let scope = &self.core.config.default_scope;
         self.get_task_scoped(scope, task_id).await

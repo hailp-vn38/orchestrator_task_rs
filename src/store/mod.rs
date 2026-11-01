@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 use crate::error::{TaskError, TaskResult};
 
 pub(crate) mod codec;
+mod collection_ops;
 mod followup_ops;
 mod recovery_ops;
 mod schedule_ops;
@@ -18,6 +19,7 @@ mod task_ops;
 mod task_query;
 
 pub(crate) use codec::{new_id, now_ms};
+pub(crate) use collection_ops::{CollectionItemRow, ITEM_FAILED, ITEM_NO_TRANSCRIPT, ITEM_SAVED};
 pub(crate) use schedule_ops::NewScheduleRow;
 pub(crate) use task_ops::{NewTaskRow, ProgressUpdate, TerminalUpdate};
 

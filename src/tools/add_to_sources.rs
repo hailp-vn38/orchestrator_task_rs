@@ -11,6 +11,10 @@ use orchestrator_agent_rs::{
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
+use crate::tools::source_identity::{
+    content_sha256, existing_source_tool_outcome, stem_free_of_collision, ExistingReason,
+    SaveSourceOutcome, CONTENT_HASH_KEY,
+};
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
 /// Công cụ `add_to_sources`: lưu bản tổng hợp Markdown vào `sources/<domain>/<topic>/<slug>.md`
@@ -210,6 +214,10 @@ impl HostTool for AddToSourcesTool {
                         "type": "string",
                         "description": "Optional existing Wiki page path/slug that this synthesis contradicts so Flow 2 preserves both perspectives non-destructively."
                     },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Rewrite a source that already exists and re-ingest it. Only when the user explicitly asks to redo it; otherwise an existing source is reported as SOURCE_ALREADY_EXISTS and nothing is written."
+                    },
                     "open_questions": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -250,6 +258,8 @@ impl HostTool for AddToSourcesTool {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
+        let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+
         // Nhánh 1: Lưu transcript video YouTube (`video_id`)
         if let Some(video_id) = args
             .get("video_id")
@@ -267,8 +277,14 @@ impl HostTool for AddToSourcesTool {
                 "Đang lưu transcript video YouTube `{video_id}` vào `sources/{raw_topic}/`..."
             ));
             let written = yt_env
-                .save_video_to_sources(video_id, raw_topic, custom_title, custom_stem, tags)
+                .save_video_to_sources(video_id, raw_topic, custom_title, custom_stem, tags, force)
                 .await?;
+            let written = match written {
+                SaveSourceOutcome::Written(written) => written,
+                SaveSourceOutcome::Existing { found, reason } => {
+                    return Ok(existing_source_tool_outcome(&ctx, &found, reason));
+                }
+            };
             return Ok(host_tool_outcome(
                 &ctx,
                 written.agent_output,
@@ -325,8 +341,15 @@ impl HostTool for AddToSourcesTool {
                     raw_topic,
                     custom_title,
                     tags,
+                    force,
                 )
                 .await?;
+            let written = match written {
+                SaveSourceOutcome::Written(written) => written,
+                SaveSourceOutcome::Existing { found, reason } => {
+                    return Ok(existing_source_tool_outcome(&ctx, &found, reason));
+                }
+            };
             return Ok(host_tool_outcome(
                 &ctx,
                 written.agent_output,
@@ -391,7 +414,37 @@ impl HostTool for AddToSourcesTool {
             })
             .unwrap_or_default();
 
+        let content_hash = content_sha256(body);
+        if !force {
+            let known = self
+                .engine
+                .find_source_by_frontmatter(CONTENT_HASH_KEY, &content_hash)
+                .map_err(|e| host_tool_err("WIKI_SOURCE_LOOKUP_FAILED", e.to_string()))?;
+            if let Some(found) = known {
+                return Ok(existing_source_tool_outcome(
+                    &ctx,
+                    &found,
+                    ExistingReason::SameIdentity,
+                ));
+            }
+        }
+        let file_stem = if force {
+            file_stem
+        } else {
+            stem_free_of_collision(
+                &self.engine,
+                &topic_folder,
+                &file_stem,
+                (CONTENT_HASH_KEY, &content_hash),
+                &content_hash[..12],
+            )
+        };
+
         let mut extra_frontmatter = vec![
+            (
+                CONTENT_HASH_KEY.to_string(),
+                Value::String(content_hash.clone()),
+            ),
             (
                 "provenance".to_string(),
                 Value::String(provenance.to_string()),

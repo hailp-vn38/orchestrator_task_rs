@@ -4,15 +4,16 @@
 use std::sync::Arc;
 
 use orchestrator_agent_rs::{
-    ErrorCode as OrchErrorCode, RunBudget, RunStatus, SubmitOptions, CODE_BUDGET_EXHAUSTED,
+    ErrorCode as OrchErrorCode, OperatorContext, RunBudget, RunStatus, SubmitOptions, ToolOutcome,
+    VerifiedToolResolution, CODE_BUDGET_EXHAUSTED, CODE_STEP_LIMIT_REACHED,
 };
 
 use crate::error::{TaskError, TaskResult};
 use crate::runtime::{lock, watcher, SharedTaskCore};
 use crate::store::{new_id, now_ms, NewTaskRow, TerminalUpdate};
 use crate::types::{
-    CreateTaskRequest, FollowupStatus, FollowupView, TaskEvent, TaskScope, TaskSource, TaskStatus,
-    TaskView,
+    CreateTaskRequest, FollowupStatus, FollowupView, ResolveStuckTool, StuckToolDecision,
+    TaskEvent, TaskScope, TaskSource, TaskStatus, TaskView,
 };
 
 pub(crate) fn budget_for_source(source: TaskSource) -> RunBudget {
@@ -338,6 +339,59 @@ impl SharedTaskCore {
         Ok(updated)
     }
 
+    /// Ghi kết luận của người vận hành cho tool không rõ kết quả rồi cho Task chạy tiếp. Không bao
+    /// giờ chạy lại tool; `session_id` là session con khi tool đó thuộc subagent.
+    pub(crate) async fn resolve_stuck_tool_internal(
+        self: &Arc<Self>,
+        request: ResolveStuckTool,
+    ) -> TaskResult<TaskView> {
+        self.ensure_open()?;
+        let scope = self.resolve_task_scope(&request.task_id).await?;
+        let task = self.store.get_task(&scope, &request.task_id).await?;
+        let orch = self.flows()?.get_flow(&task.flow_id)?;
+        let operator =
+            OperatorContext::new(request.operator_id, &scope.owner_id, &scope.workspace_id)
+                .with_resolve_capability();
+        let session_id = request
+            .session_id
+            .as_deref()
+            .unwrap_or(task.session_id.as_str());
+        let decision = match request.decision {
+            StuckToolDecision::NoEffect { evidence } => {
+                VerifiedToolResolution::ConfirmedNoEffect { evidence }
+            }
+            StuckToolDecision::Completed {
+                tool_call_id,
+                result_text,
+                evidence,
+            } => VerifiedToolResolution::ConfirmedCompleted {
+                outcome: ToolOutcome {
+                    call_id: tool_call_id,
+                    content: result_text,
+                    metadata: serde_json::Value::Null,
+                },
+                evidence,
+            },
+        };
+        match orch
+            .resolve_interrupted_invocation(&operator, session_id, &request.invocation_id, decision)
+            .await
+        {
+            Ok(()) => {}
+            Err(err) if err.code() == OrchErrorCode::InvalidInput => {
+                return Err(TaskError::invalid_state(err.message()));
+            }
+            Err(err) => return Err(TaskError::from(err)),
+        }
+        let updated = self
+            .store
+            .reopen_task(&task.id, "Resuming after tool outcome was resolved...")
+            .await?
+            .unwrap_or(task);
+        watcher::ensure_task_watcher(Arc::clone(self), updated.clone());
+        Ok(updated)
+    }
+
     /// Ghi trạng thái chờ lên Task và phát progress. Task đã kết thúc giữ nguyên, không phát gì.
     pub(crate) async fn project_task_waiting(
         &self,
@@ -446,10 +500,9 @@ impl SharedTaskCore {
             }
 
             let is_budget_exhausted = res.status != RunStatus::Cancelled
-                && res
-                    .error
-                    .as_ref()
-                    .is_some_and(|e| e.code == CODE_BUDGET_EXHAUSTED);
+                && res.error.as_ref().is_some_and(|e| {
+                    e.code == CODE_BUDGET_EXHAUSTED || e.code == CODE_STEP_LIMIT_REACHED
+                });
 
             // Nếu turn vừa hoàn tất bình thường và có followup đang chờ trong hàng đợi -> tự động submit followup kế tiếp!
             if res.status == RunStatus::Completed && !is_budget_exhausted {

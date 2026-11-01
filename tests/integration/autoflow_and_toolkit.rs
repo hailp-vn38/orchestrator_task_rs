@@ -200,9 +200,9 @@ async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
 
     // Kiểm tra các nhóm tool xuất ra từ WorkspaceToolKit
     assert_eq!(toolkit.pdf_host_tools().len(), 1);
-    assert_eq!(toolkit.youtube_host_tools().len(), 2);
+    assert_eq!(toolkit.youtube_host_tools().len(), 3);
     assert_eq!(toolkit.web_host_tools().len(), 6);
-    assert_eq!(toolkit.collector_host_tools().len(), 9);
+    assert_eq!(toolkit.collector_host_tools().len(), 10);
     assert_eq!(toolkit.report_host_tools().len(), 2);
     assert!(!toolkit.wiki_readonly_host_tools().is_empty());
     assert!(toolkit.wiki_host_tools().len() > toolkit.wiki_readonly_host_tools().len());

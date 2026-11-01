@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use llm_wiki::WikiEngine;
+use llm_wiki::{AutoflowPlanOptions, WikiEngine};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -135,6 +135,60 @@ impl WikiAutoFlowBinding {
     }
 }
 
+/// Đối chiếu các nguồn chặng vừa nhận với trạng thái Vault. Trả `true` khi còn nguồn dở, tức chữ ký
+/// Vault không đổi vẫn được phép chạy lại (có giới hạn bởi `autoflow_max_source_attempts`).
+async fn settle_ingest_batch(
+    core: &SharedTaskCore,
+    engine: &WikiEngine,
+    task_id: &str,
+    batch: &[String],
+    quarantined: &[String],
+    terminal_status: Option<TaskStatus>,
+) -> bool {
+    let Ok(lint) = engine.lint_wiki() else {
+        return false;
+    };
+    let is_pending = |path: &String| {
+        lint.uningested_sources
+            .iter()
+            .any(|s| &s.source_rel_path == path)
+            || lint
+                .incomplete_ingests
+                .iter()
+                .any(|i| &i.source_rel_path == path)
+    };
+    // Nguồn bị cách ly mà nay đã đủ trang (ví dụ agent hoặc người khác đã ingest) thì tự ra khỏi cách ly.
+    let finished: Vec<String> = batch
+        .iter()
+        .chain(quarantined)
+        .filter(|path| !is_pending(path))
+        .cloned()
+        .collect();
+    if let Err(e) = core.store.clear_source_ingest_attempts(&finished).await {
+        warn!("autoflow could not clear ingest attempts: {e}");
+    }
+    let unfinished: Vec<String> = batch.iter().filter(|p| is_pending(p)).cloned().collect();
+    // Dừng vì hết ngân sách, bị hủy hay shutdown không nói gì về việc nguồn có lỗi hay không.
+    if unfinished.is_empty()
+        || !matches!(
+            terminal_status,
+            Some(TaskStatus::Completed | TaskStatus::Failed)
+        )
+    {
+        return false;
+    }
+    if let Err(e) = core
+        .store
+        .bump_source_ingest_attempts(&unfinished, task_id)
+        .await
+    {
+        warn!("autoflow could not record ingest attempts: {e}");
+        return false;
+    }
+    warn!(task_id, sources = ?unfinished, "autoflow stage left sources unfinished");
+    true
+}
+
 pub(crate) fn spawn_autoflow_loop(
     core: Arc<SharedTaskCore>,
     binding: WikiAutoFlowBinding,
@@ -166,7 +220,7 @@ pub(crate) fn spawn_autoflow_loop(
                 let has_new_sources = binding
                     .engine
                     .lint_wiki()
-                    .map(|l| !l.uningested_sources.is_empty())
+                    .map(|l| !l.uningested_sources.is_empty() || !l.incomplete_ingests.is_empty())
                     .unwrap_or(false);
                 if !has_new_sources {
                     continue;
@@ -176,6 +230,7 @@ pub(crate) fn spawn_autoflow_loop(
             // Chạy liên tiếp các chặng chừng nào mỗi chặng đều làm thay đổi trạng thái Vault:
             // Chặng 1+: `[AUTO-FLOW: NEW SOURCES DETECTED]` -> Chặng cuối: `[AUTO-FLOW: WIKI LINT]`
             let mut stage_count = 0usize;
+            let cycle_started = tokio::time::Instant::now();
             while stage_count < MAX_AUTOFLOW_STAGES_PER_CYCLE {
                 if core.shutdown.is_cancelled() {
                     break;
@@ -207,8 +262,39 @@ pub(crate) fn spawn_autoflow_loop(
                     }
                 }
 
-                let next_prompt = match binding.engine.build_next_autoflow_prompt(None) {
-                    Ok(Some(p)) => p,
+                // Task thu thập còn chạy thì còn nguồn mới: chờ để không tổng hợp trên dữ liệu dở dang.
+                // Có giới hạn thời gian để một Task treo không chặn Wiki mãi.
+                let collection_wait_max = core.config.runtime.autoflow_collection_wait_max;
+                if cycle_started.elapsed() < collection_wait_max
+                    && core
+                        .store
+                        .has_active_source_writer(&binding.flow_id, &binding.agent_id)
+                        .await
+                        .unwrap_or(false)
+                {
+                    tokio::select! {
+                        biased;
+                        () = core.shutdown.cancelled() => break,
+                        () = &mut active_done => continue,
+                        () = tokio::time::sleep(poll_interval) => continue,
+                    }
+                }
+
+                let max_source_attempts = core.config.runtime.autoflow_max_source_attempts;
+                let quarantined = core
+                    .store
+                    .quarantined_sources(max_source_attempts)
+                    .await
+                    .unwrap_or_default();
+                let plan = binding.engine.plan_next_autoflow(
+                    None,
+                    &AutoflowPlanOptions {
+                        max_sources: Some(core.config.runtime.autoflow_batch_size),
+                        exclude_sources: &quarantined,
+                    },
+                );
+                let (next_prompt, ingest_batch) = match plan {
+                    Ok(Some(p)) => (p.prompt, p.ingest_batch),
                     Ok(None) => {
                         last_attempted_signature = AutoflowVaultSignature::capture(&binding.engine);
                         break;
@@ -288,6 +374,21 @@ pub(crate) fn spawn_autoflow_loop(
                         }
                         let _ = binding.engine.embed_pending(false);
                         let _ = binding.engine.rebuild_or_sync_index_md();
+
+                        // Nguồn còn dở sau chặng được tính một lần thất bại và được thử lại; đủ số lần
+                        // thì bị cách ly để không chặn hàng đợi và chặng tổng hợp.
+                        if settle_ingest_batch(
+                            &core,
+                            &binding.engine,
+                            &task.id,
+                            &ingest_batch,
+                            &quarantined,
+                            terminal_status,
+                        )
+                        .await
+                        {
+                            last_attempted_signature = None;
+                        }
 
                         // Nếu Task bị Failed hoặc Cancelled, không tự động chạy tiếp chặng kế tiếp
                         if matches!(

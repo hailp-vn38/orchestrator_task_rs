@@ -4,7 +4,8 @@
 use crate::error::TaskResult;
 use crate::manager::TaskManager;
 use crate::types::{
-    CreateTaskRequest, FollowupView, TaskScope, TaskSource, TaskView, WikiDeleteOutcome,
+    CreateTaskRequest, FollowupView, ResolveStuckTool, TaskScope, TaskSource, TaskView,
+    WikiDeleteOutcome,
 };
 
 impl TaskManager {
@@ -80,6 +81,11 @@ impl TaskManager {
     pub async fn resume_waiting_task_any_scope(&self, task_id: &str) -> TaskResult<TaskView> {
         let scope = self.core.resolve_task_scope(task_id).await?;
         self.resume_waiting_task_scoped(&scope, task_id).await
+    }
+
+    /// Đối soát một tool bị kẹt ở trạng thái không rõ kết quả rồi cho Task chạy tiếp.
+    pub async fn resolve_stuck_tool(&self, request: ResolveStuckTool) -> TaskResult<TaskView> {
+        self.core.resolve_stuck_tool_internal(request).await
     }
 
     /// Hủy một Task đang chạy trong `default_scope`.

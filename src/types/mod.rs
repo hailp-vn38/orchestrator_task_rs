@@ -22,6 +22,7 @@ pub use schedule::{
 };
 pub use scope::{TaskScope, DEFAULT_OWNER_ID, DEFAULT_WORKSPACE_ID};
 pub use task::{
-    AgentCatalogEntry, CreateTaskRequest, FollowupStatus, FollowupView, TaskDetailView, TaskFilter,
-    TaskPage, TaskSource, TaskStatus, TaskView, WikiDeleteOutcome,
+    AgentCatalogEntry, CreateTaskRequest, FollowupStatus, FollowupView, ResolveStuckTool,
+    StuckToolDecision, TaskDetailView, TaskFilter, TaskPage, TaskSource, TaskStatus, TaskView,
+    WikiDeleteOutcome,
 };

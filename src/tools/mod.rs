@@ -26,6 +26,7 @@ pub mod media_video;
 pub mod media_video_concat;
 pub mod pdf;
 pub(crate) mod pdf_convert;
+pub mod source_identity;
 pub mod toolkit;
 pub(crate) mod voice_handler;
 pub mod web;
@@ -59,6 +60,7 @@ pub use pdf::{
     build_sample_technical_pdf, convert_document_with_anydoc, pdf_host_tools, AnydocInspectPdfTool,
     AnydocSaveToSourcesTool, ConvertedPdfDoc, SharedPdfState,
 };
+pub use source_identity::{ExistingReason, SaveSourceOutcome};
 pub use toolkit::{WorkspaceToolKit, COLLECTOR_TOOL_NAMES};
 pub use web::{
     clean_noise_tags, collapse_ws, decode_html_entities, extract_article, extract_feed_items,
@@ -71,7 +73,7 @@ pub use wiki_bridge::{
     WikiEngineBridgeTool,
 };
 pub use youtube::{
-    fetch_playlist, fetch_transcript, youtube_host_tools, PlaylistVideoEntry, YoutubeCollectorEnv,
+    youtube_host_tools, CollectionStatusTool, PlaylistVideoEntry, YoutubeCollectorEnv,
     YtFetchTranscriptTool, YtListPlaylistTool,
 };
 

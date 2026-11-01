@@ -4,11 +4,13 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::process::{Output, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use llm_wiki::{
-    clip_transcript, sanitize_topic_folder, slugify, vtt_to_text, WikiEngine,
-    WriteTopicSourceRequest, WriteTopicSourceResponse,
+    clip_transcript, sanitize_topic_folder, slugify, vtt_to_text, SourceMatch, WikiEngine,
+    WriteTopicSourceRequest,
 };
 use orchestrator_agent_rs::{
     HostTool, ToolContext, ToolDescriptor, ToolEffect, ToolError, ToolOutcome,
@@ -16,6 +18,11 @@ use orchestrator_agent_rs::{
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
+use crate::store::{CollectionItemRow, TaskStore, ITEM_FAILED, ITEM_NO_TRANSCRIPT, ITEM_SAVED};
+use crate::tools::source_identity::{
+    content_sha256, ingest_status_label, stem_free_of_collision, ExistingReason, SaveSourceOutcome,
+    CONTENT_HASH_KEY, VIDEO_ID_KEY,
+};
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
 /// Giới hạn ký tự cho bản xem trước ngắn khi lưu transcript vào `sources/`.
@@ -23,6 +30,16 @@ const COLLECTOR_PREVIEW_CHARS: usize = 600;
 
 /// Giới hạn ký tự tối đa trả về trực tiếp khi đọc/tóm tắt transcript (`yt_fetch_transcript`).
 const READONLY_TRANSCRIPT_MAX_CHARS: usize = 32_000;
+
+/// Thời gian tối đa của một lệnh `yt-dlp`. Một lần tải transcript chạy tối đa 2 lệnh, nên luôn kết
+/// thúc trước `tool_timeout` (300s) của `add_to_sources`: lỗi rõ ràng, không thành "outcome unknown".
+const YTDLP_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Video lỗi từng này lần thì không còn nằm trong danh sách việc cần làm.
+const MAX_ITEM_ATTEMPTS: i64 = 3;
+
+const DEFAULT_STATUS_LIMIT: usize = 15;
+const MAX_STATUS_LIMIT: usize = 50;
 
 /// Thông tin một video trong YouTube Playlist đã được liệt kê hoặc tải phụ đề.
 #[derive(Clone, Debug)]
@@ -46,6 +63,13 @@ pub struct YoutubeCollectorEnv {
     pub playlist_url: Mutex<String>,
     pub videos: Mutex<Vec<PlaylistVideoEntry>>,
     pub transcripts: Mutex<HashMap<String, String>>,
+    ytdlp_bin: PathBuf,
+    ytdlp_timeout: Duration,
+    ledger: OnceLock<TaskStore>,
+}
+
+fn video_stem(title: &str, video_id: &str) -> String {
+    format!("{}-{video_id}", slugify(title, 36))
 }
 
 impl YoutubeCollectorEnv {
@@ -64,6 +88,58 @@ impl YoutubeCollectorEnv {
             playlist_url: Mutex::new(String::new()),
             videos: Mutex::new(Vec::new()),
             transcripts: Mutex::new(HashMap::new()),
+            ytdlp_bin: PathBuf::from("yt-dlp"),
+            ytdlp_timeout: YTDLP_COMMAND_TIMEOUT,
+            ledger: OnceLock::new(),
+        }
+    }
+
+    /// Chọn chương trình `yt-dlp` và thời gian tối đa của mỗi lệnh.
+    pub fn with_ytdlp(mut self, bin: impl Into<PathBuf>, timeout: Duration) -> Self {
+        self.ytdlp_bin = bin.into();
+        self.ytdlp_timeout = timeout;
+        self
+    }
+
+    pub(crate) fn attach_ledger(&self, ledger: TaskStore) {
+        let _ = self.ledger.set(ledger);
+    }
+
+    async fn record_outcome(
+        &self,
+        video_id: &str,
+        status: &str,
+        source_path: Option<&str>,
+        error: Option<&str>,
+    ) {
+        let Some(ledger) = self.ledger.get() else {
+            return;
+        };
+        if let Err(e) = ledger
+            .record_collection_outcome(video_id, status, source_path, error)
+            .await
+        {
+            tracing::warn!("could not record collection outcome for {video_id}: {e}");
+        }
+    }
+
+    async fn run_ytdlp(&self, args: Vec<std::ffi::OsString>) -> Result<Output, ToolError> {
+        let mut command = tokio::process::Command::new(&self.ytdlp_bin);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        match tokio::time::timeout(self.ytdlp_timeout, command.output()).await {
+            Ok(result) => result.map_err(ytdlp_unavailable),
+            Err(_) => Err(host_tool_err(
+                "YTDLP_TIMEOUT",
+                format!(
+                    "yt-dlp không trả lời sau {}s; video này có thể thử lại sau",
+                    self.ytdlp_timeout.as_secs()
+                ),
+            )),
         }
     }
 
@@ -103,12 +179,19 @@ impl YoutubeCollectorEnv {
         {
             return Ok(cached);
         }
-        let work = self.work_dir.clone();
-        let langs = self.langs.clone();
-        let vid = video_id.to_string();
-        let transcript = tokio::task::spawn_blocking(move || fetch_transcript(&work, &vid, &langs))
-            .await
-            .map_err(|e| host_tool_err("INTERNAL", e.to_string()))??;
+        let transcript = match self.fetch_transcript(video_id).await {
+            Ok(transcript) => transcript,
+            Err(error) => {
+                let status = if error.code == "NO_TRANSCRIPT" {
+                    ITEM_NO_TRANSCRIPT
+                } else {
+                    ITEM_FAILED
+                };
+                self.record_outcome(video_id, status, None, Some(&error.message))
+                    .await;
+                return Err(error);
+            }
+        };
         self.transcripts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -116,7 +199,9 @@ impl YoutubeCollectorEnv {
         Ok(transcript)
     }
 
-    /// Lưu transcript của `video_id` vào `sources/<topic_folder>/<stem>.md` và kích hoạt `autoflow_notify`.
+    /// Lưu transcript của `video_id` vào `sources/<topic_folder>/` và kích hoạt `autoflow_notify`.
+    /// Video đã có (theo `video_id`, hoặc theo nội dung nếu là bản đăng lại) không được tải hay ghi
+    /// lại, trừ khi `force`.
     pub async fn save_video_to_sources(
         &self,
         video_id: &str,
@@ -124,8 +209,18 @@ impl YoutubeCollectorEnv {
         custom_title: Option<&str>,
         custom_stem: Option<&str>,
         tags: Vec<String>,
-    ) -> Result<WriteTopicSourceResponse, ToolError> {
-        let topic_folder = sanitize_topic_folder(raw_topic_folder);
+        force: bool,
+    ) -> Result<SaveSourceOutcome, ToolError> {
+        let known_source = self.find_source(VIDEO_ID_KEY, video_id)?;
+        if let (false, Some(found)) = (force, known_source.clone()) {
+            self.record_outcome(video_id, ITEM_SAVED, Some(&found.scoped_path), None)
+                .await;
+            return Ok(SaveSourceOutcome::Existing {
+                found,
+                reason: ExistingReason::SameIdentity,
+            });
+        }
+
         let known_entry = self
             .videos
             .lock()
@@ -133,34 +228,70 @@ impl YoutubeCollectorEnv {
             .iter()
             .find(|v| v.id == video_id)
             .cloned();
-
-        let (default_stem, default_title, idx) = if let Some(entry) = known_entry {
-            (entry.stem, entry.title, entry.index)
-        } else {
-            let fallback_title = custom_title
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or(video_id)
-                .to_string();
-            let fallback_stem = slugify(&fallback_title, 36);
-            (fallback_stem, fallback_title, 0)
+        // Sau restart danh sách trong RAM mất, sổ theo dõi vẫn còn tiêu đề và playlist.
+        let ledger_entry = match self.ledger.get() {
+            Some(ledger) => ledger
+                .collection_item_identity(video_id)
+                .await
+                .map_err(|e| host_tool_err("COLLECTION_LEDGER_FAILED", e.to_string()))?,
+            None => None,
         };
-
+        let (known_title, playlist_url, idx) = match (known_entry, ledger_entry) {
+            (Some(entry), _) => (
+                Some(entry.title),
+                self.playlist_url
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+                entry.index,
+            ),
+            (None, Some((title, playlist, position))) => (
+                Some(title),
+                playlist,
+                usize::try_from(position).unwrap_or(0),
+            ),
+            (None, None) => (None, String::new(), 0),
+        };
         let title = custom_title
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or(&default_title)
-            .to_string();
-        let stem = custom_stem
-            .map(|s| slugify(s, 64))
-            .filter(|s| !s.is_empty())
-            .unwrap_or(default_stem);
+            .map(ToString::to_string)
+            .or(known_title)
+            .unwrap_or_else(|| video_id.to_string());
 
         let transcript = self.get_or_fetch_transcript(video_id).await?;
-        let playlist_url = self
-            .playlist_url
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let content_hash = content_sha256(&transcript);
+        if !force {
+            if let Some(found) = self.find_source(CONTENT_HASH_KEY, &content_hash)? {
+                self.record_outcome(video_id, ITEM_SAVED, Some(&found.scoped_path), None)
+                    .await;
+                return Ok(SaveSourceOutcome::Existing {
+                    found,
+                    reason: ExistingReason::SameContent,
+                });
+            }
+        }
+
+        let (topic_folder, stem) = match known_source.as_ref().filter(|_| force) {
+            // Làm lại giữ nguyên đường dẫn cũ để Auto-Flow gộp vào trang wiki hiện có.
+            Some(found) => split_scoped_path(&found.scoped_path),
+            None => {
+                let topic_folder = sanitize_topic_folder(raw_topic_folder);
+                let requested = custom_stem
+                    .map(|s| slugify(s, 64))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| video_stem(&title, video_id));
+                let stem = stem_free_of_collision(
+                    &self.engine,
+                    &topic_folder,
+                    &requested,
+                    (VIDEO_ID_KEY, video_id),
+                    video_id,
+                );
+                (topic_folder, stem)
+            }
+        };
+
         let youtube_url = format!("https://www.youtube.com/watch?v={video_id}");
         let youtube_embed_md = format!("![{title}]({youtube_url})");
 
@@ -174,7 +305,8 @@ impl YoutubeCollectorEnv {
                 body_heading: Some("Raw Transcript".to_string()),
                 tags,
                 extra_frontmatter: vec![
-                    ("video_id".to_string(), json!(video_id)),
+                    (VIDEO_ID_KEY.to_string(), json!(video_id)),
+                    (CONTENT_HASH_KEY.to_string(), json!(content_hash)),
                     ("youtube_url".to_string(), json!(youtube_url)),
                     ("playlist_url".to_string(), json!(playlist_url)),
                     ("playlist_index".to_string(), json!(idx)),
@@ -198,9 +330,224 @@ impl YoutubeCollectorEnv {
         {
             entry.saved_source_scoped_path = Some(written.info.scoped_path.clone());
         }
+        self.record_outcome(video_id, ITEM_SAVED, Some(&written.info.scoped_path), None)
+            .await;
 
         self.autoflow_notify.notify_one();
-        Ok(written)
+        Ok(SaveSourceOutcome::Written(Box::new(written)))
+    }
+
+    fn find_source(&self, key: &str, value: &str) -> Result<Option<SourceMatch>, ToolError> {
+        self.engine
+            .find_source_by_frontmatter(key, value)
+            .map_err(|e| host_tool_err("WIKI_SOURCE_LOOKUP_FAILED", e.to_string()))
+    }
+
+    /// Tóm tắt playlist và các video cần làm tiếp, lấy `sources/` làm sự thật cho video đã lưu.
+    async fn collection_report(
+        &self,
+        collection_key: &str,
+        limit: usize,
+    ) -> Result<Option<CollectionReport>, ToolError> {
+        let Some(ledger) = self.ledger.get() else {
+            return Ok(None);
+        };
+        let items = ledger
+            .list_collection_items(collection_key)
+            .await
+            .map_err(|e| host_tool_err("COLLECTION_LEDGER_FAILED", e.to_string()))?;
+        if items.is_empty() {
+            return Ok(None);
+        }
+        let in_vault = self
+            .engine
+            .sources_by_frontmatter(VIDEO_ID_KEY)
+            .map_err(|e| host_tool_err("WIKI_SOURCE_LOOKUP_FAILED", e.to_string()))?;
+        Ok(Some(CollectionReport::build(items, &in_vault, limit)))
+    }
+
+    async fn fetch_playlist(&self, url: &str) -> Result<Vec<(String, String)>, ToolError> {
+        http_url(url)?;
+        let out = self
+            .run_ytdlp(
+                ["--flat-playlist", "--print", "%(id)s\t%(title)s", "--", url]
+                    .map(Into::into)
+                    .to_vec(),
+            )
+            .await?;
+        if !out.status.success() {
+            return Err(host_tool_err("YTDLP_FAILED", stderr_tail(&out.stderr)));
+        }
+        let list: Vec<(String, String)> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let (id, title) = l.trim().split_once('\t')?;
+                (!id.trim().is_empty()).then(|| (id.trim().to_string(), title.trim().to_string()))
+            })
+            .collect();
+        if list.is_empty() {
+            return Err(host_tool_err(
+                "EMPTY_PLAYLIST",
+                "Playlist không có video nào",
+            ));
+        }
+        Ok(list)
+    }
+
+    /// Tải phụ đề VTT cho `id` theo thứ tự ngôn ngữ ưu tiên và làm sạch bằng `vtt_to_text`.
+    async fn fetch_transcript(&self, id: &str) -> Result<String, ToolError> {
+        let parsed_langs: Vec<&str> = self
+            .langs
+            .split(',')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let orig_langs = parsed_langs
+            .iter()
+            .map(|l| format!("{l}-orig"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sub_langs = parsed_langs
+            .iter()
+            .flat_map(|l| [format!("{l}-orig"), (*l).to_string()])
+            .collect::<Vec<_>>()
+            .join(",");
+        let dir = self.work_dir.join(id);
+        std::fs::create_dir_all(&dir).map_err(|e| host_tool_err("IO", e.to_string()))?;
+
+        let mut subs = collect_vtts(&dir)?;
+        let mut last_output = None;
+
+        // Ưu tiên tải phụ đề gốc (`*-orig`) trước để tránh bị YouTube trả HTTP 429 khi dịch tự động (`&tlang=`).
+        for candidate_langs in [&orig_langs, &sub_langs] {
+            if !subs.is_empty() || candidate_langs.is_empty() {
+                break;
+            }
+            let args: Vec<std::ffi::OsString> = vec![
+                "--skip-download".into(),
+                "--no-playlist".into(),
+                "--write-subs".into(),
+                "--write-auto-subs".into(),
+                "--sub-langs".into(),
+                candidate_langs.into(),
+                "--sub-format".into(),
+                "vtt".into(),
+                "-o".into(),
+                dir.join("%(id)s.%(ext)s").into(),
+                "--".into(),
+                format!("https://www.youtube.com/watch?v={id}").into(),
+            ];
+            last_output = Some(self.run_ytdlp(args).await?);
+            subs = collect_vtts(&dir)?;
+        }
+
+        if subs.is_empty() {
+            return Err(match last_output {
+                Some(output) if !output.status.success() => {
+                    host_tool_err("YTDLP_FAILED", stderr_tail(&output.stderr))
+                }
+                _ => host_tool_err(
+                    "NO_TRANSCRIPT",
+                    format!("Video {id} không có phụ đề cho: {sub_langs}"),
+                ),
+            });
+        }
+        let order: Vec<&str> = sub_langs.split(',').collect();
+        subs.sort_by_key(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let rank = order
+                .iter()
+                .position(|l| name.contains(&format!(".{l}.")))
+                .unwrap_or(usize::MAX);
+            (rank, name)
+        });
+        let text = vtt_to_text(
+            &std::fs::read_to_string(&subs[0]).map_err(|e| host_tool_err("IO", e.to_string()))?,
+        );
+        if text.is_empty() {
+            return Err(host_tool_err("NO_TRANSCRIPT", "Phụ đề rỗng"));
+        }
+        Ok(text)
+    }
+}
+
+fn collect_vtts(dir: &Path) -> Result<Vec<PathBuf>, ToolError> {
+    Ok(std::fs::read_dir(dir)
+        .map_err(|e| host_tool_err("IO", e.to_string()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "vtt"))
+        .collect())
+}
+
+fn split_scoped_path(scoped_path: &str) -> (String, String) {
+    let clean = scoped_path.trim_end_matches(".md");
+    match clean.rsplit_once('/') {
+        Some((folder, stem)) => (folder.to_string(), stem.to_string()),
+        None => (String::new(), clean.to_string()),
+    }
+}
+
+/// Trạng thái playlist trả cho agent: đủ để một session mới biết phải làm tiếp video nào.
+struct CollectionReport {
+    total: usize,
+    in_sources: usize,
+    no_transcript: usize,
+    gave_up: usize,
+    remaining: usize,
+    next: Vec<CollectionItemRow>,
+    statuses: HashMap<String, String>,
+}
+
+impl CollectionReport {
+    fn build(
+        items: Vec<CollectionItemRow>,
+        in_vault: &HashMap<String, SourceMatch>,
+        limit: usize,
+    ) -> Self {
+        let mut report = Self {
+            total: items.len(),
+            in_sources: 0,
+            no_transcript: 0,
+            gave_up: 0,
+            remaining: 0,
+            next: Vec::new(),
+            statuses: HashMap::new(),
+        };
+        for item in items {
+            let status = if let Some(found) = in_vault.get(&item.item_id) {
+                report.in_sources += 1;
+                ingest_status_label(found.ingest_state).to_string()
+            } else if item.status == ITEM_NO_TRANSCRIPT {
+                report.no_transcript += 1;
+                "no_transcript".to_string()
+            } else if item.attempts >= MAX_ITEM_ATTEMPTS {
+                report.gave_up += 1;
+                format!("gave_up(attempts={})", item.attempts)
+            } else {
+                report.remaining += 1;
+                let label = if item.status == ITEM_FAILED {
+                    format!("failed(attempts={})", item.attempts)
+                } else {
+                    "new".to_string()
+                };
+                if report.next.len() < limit {
+                    report.next.push(item.clone());
+                }
+                label
+            };
+            report.statuses.insert(item.item_id, status);
+        }
+        report
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "TOTAL: {} | IN_SOURCES: {} | REMAINING: {} | NO_TRANSCRIPT: {} | GAVE_UP: {}",
+            self.total, self.in_sources, self.remaining, self.no_transcript, self.gave_up
+        )
     }
 }
 
@@ -210,7 +557,10 @@ pub fn youtube_host_tools(env: Arc<YoutubeCollectorEnv>) -> Vec<Arc<dyn HostTool
         Arc::new(YtListPlaylistTool {
             env: Arc::clone(&env),
         }),
-        Arc::new(YtFetchTranscriptTool { env }),
+        Arc::new(YtFetchTranscriptTool {
+            env: Arc::clone(&env),
+        }),
+        Arc::new(CollectionStatusTool { env }),
     ]
 }
 
@@ -230,7 +580,7 @@ impl HostTool for YtListPlaylistTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "yt_list_playlist".to_string(),
-            description: "List all videos in a YouTube playlist URL using yt-dlp. Returns `index`, `video_id`, `file_stem`, and `title` so the agent can analyze the playlist theme and choose a topic folder (`<domain>/<topic>`) inside `sources/`.".to_string(),
+            description: "List all videos in a YouTube playlist URL using yt-dlp and record them in the collection ledger. Returns `index`, `video_id`, `file_stem`, `status` (new, failed, no_transcript, gave_up, pending_ingest, already_ingested) and `title`, so the agent can skip videos already in `sources/` and choose a topic folder (`<domain>/<topic>`).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["url"],
@@ -261,16 +611,20 @@ impl HostTool for YtListPlaylistTool {
             .unwrap_or_else(|e| e.into_inner()) = url.clone();
         ctx.progress("Đang lấy danh sách video từ playlist bằng yt-dlp...");
 
-        let mut raw_list = tokio::task::spawn_blocking(move || fetch_playlist(&url))
-            .await
-            .map_err(|e| host_tool_err("INTERNAL", e.to_string()))??;
+        let mut raw_list = self.env.fetch_playlist(&url).await?;
         raw_list.truncate(self.env.limit);
+        if let Some(ledger) = self.env.ledger.get() {
+            ledger
+                .upsert_collection_items(&url, &raw_list)
+                .await
+                .map_err(|e| host_tool_err("COLLECTION_LEDGER_FAILED", e.to_string()))?;
+        }
 
         let entries: Vec<PlaylistVideoEntry> = raw_list
             .into_iter()
             .enumerate()
             .map(|(i, (id, title))| {
-                let stem = format!("{:02}-{}", i + 1, slugify(&title, 36));
+                let stem = video_stem(&title, &id);
                 PlaylistVideoEntry {
                     index: i + 1,
                     id,
@@ -281,10 +635,19 @@ impl HostTool for YtListPlaylistTool {
             })
             .collect();
 
-        let mut text = String::new();
+        let report = self.env.collection_report(&url, 0).await?;
+        let mut text = report
+            .as_ref()
+            .map(|r| format!("{}\n", r.summary()))
+            .unwrap_or_default();
         for v in &entries {
+            let status = report
+                .as_ref()
+                .and_then(|r| r.statuses.get(&v.id))
+                .map(String::as_str)
+                .unwrap_or("new");
             text.push_str(&format!(
-                "{}. video_id={} file_stem={} title={}\n",
+                "{}. video_id={} file_stem={} status={status} title={}\n",
                 v.index, v.id, v.stem, v.title
             ));
         }
@@ -406,6 +769,82 @@ impl HostTool for YtFetchTranscriptTool {
     }
 }
 
+/// Công cụ `collection_status`: đọc sổ theo dõi của playlist, không gọi mạng. Session mới hoặc Task
+/// làm lại dùng nó để biết còn video nào, thay vì dựa vào context đã bị nén.
+pub struct CollectionStatusTool {
+    pub env: Arc<YoutubeCollectorEnv>,
+}
+
+#[async_trait::async_trait]
+impl HostTool for CollectionStatusTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "collection_status".to_string(),
+            description: "Read the collection ledger of a YouTube playlist already listed by `yt_list_playlist`: totals plus the next videos still to process. Makes no network call. Use it to pick the next batch after a restart, in a new session, or when retrying a job.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["playlist_url"],
+                "properties": {
+                    "playlist_url": {
+                        "type": "string",
+                        "description": "The same playlist URL passed to `yt_list_playlist`."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many remaining videos to return (default 15, max 50)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            effect: ToolEffect::ReadOnly,
+        }
+    }
+
+    async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutcome, ToolError> {
+        let url = args
+            .get("playlist_url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| host_tool_err("INVALID_ARGUMENT", "Thiếu hoặc rỗng: playlist_url"))?;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map_or(DEFAULT_STATUS_LIMIT, |n| n as usize)
+            .clamp(1, MAX_STATUS_LIMIT);
+        let report = self
+            .env
+            .collection_report(url, limit)
+            .await?
+            .ok_or_else(|| {
+                host_tool_err(
+                    "UNKNOWN_COLLECTION",
+                    "Playlist chưa có trong sổ theo dõi; gọi yt_list_playlist trước",
+                )
+            })?;
+        let mut text = format!("{}\nNEXT:\n", report.summary());
+        for item in &report.next {
+            text.push_str(&format!(
+                "{}. video_id={} attempts={} title={}\n",
+                item.position, item.item_id, item.attempts, item.title
+            ));
+            if let Some(error) = &item.last_error {
+                text.push_str(&format!("   last_error={}\n", clip_transcript(error, 200)));
+            }
+        }
+        Ok(host_tool_outcome(
+            &ctx,
+            text,
+            json!({
+                "total": report.total,
+                "in_sources": report.in_sources,
+                "remaining": report.remaining,
+                "no_transcript": report.no_transcript,
+                "gave_up": report.gave_up,
+            }),
+        ))
+    }
+}
+
 fn http_url(url: &str) -> Result<(), ToolError> {
     if url.starts_with("http://") || url.starts_with("https://") {
         Ok(())
@@ -425,120 +864,4 @@ fn stderr_tail(stderr: &[u8]) -> String {
     let s = String::from_utf8_lossy(stderr);
     let tail: Vec<char> = s.chars().rev().take(600).collect();
     tail.into_iter().rev().collect()
-}
-
-/// Gọi `yt-dlp --flat-playlist` để lấy danh sách `(video_id, title)` từ URL playlist.
-pub fn fetch_playlist(url: &str) -> Result<Vec<(String, String)>, ToolError> {
-    http_url(url)?;
-    let out = std::process::Command::new("yt-dlp")
-        .args(["--flat-playlist", "--print", "%(id)s\t%(title)s", "--"])
-        .arg(url)
-        .output()
-        .map_err(ytdlp_unavailable)?;
-    if !out.status.success() {
-        return Err(host_tool_err("YTDLP_FAILED", stderr_tail(&out.stderr)));
-    }
-    let list: Vec<(String, String)> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let (id, title) = l.trim().split_once('\t')?;
-            (!id.trim().is_empty()).then(|| (id.trim().to_string(), title.trim().to_string()))
-        })
-        .collect();
-    if list.is_empty() {
-        return Err(host_tool_err(
-            "EMPTY_PLAYLIST",
-            "Playlist không có video nào",
-        ));
-    }
-    Ok(list)
-}
-
-/// Gọi `yt-dlp` tải phụ đề VTT cho `video_id` theo thứ tự ngôn ngữ ưu tiên `langs` và làm sạch bằng `vtt_to_text`.
-pub fn fetch_transcript(work: &Path, id: &str, langs: &str) -> Result<String, ToolError> {
-    let parsed_langs: Vec<&str> = langs
-        .split(',')
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let orig_langs = parsed_langs
-        .iter()
-        .map(|l| format!("{l}-orig"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sub_langs = parsed_langs
-        .iter()
-        .flat_map(|l| [format!("{l}-orig"), (*l).to_string()])
-        .collect::<Vec<_>>()
-        .join(",");
-    let dir = work.join(id);
-    std::fs::create_dir_all(&dir).map_err(|e| host_tool_err("IO", e.to_string()))?;
-
-    let collect_vtts = |d: &Path| -> Result<Vec<PathBuf>, ToolError> {
-        Ok(std::fs::read_dir(d)
-            .map_err(|e| host_tool_err("IO", e.to_string()))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "vtt"))
-            .collect())
-    };
-
-    let mut subs = collect_vtts(&dir)?;
-    let mut last_output = None;
-
-    // Ưu tiên tải phụ đề gốc (`*-orig`) trước để tránh bị YouTube trả HTTP 429 khi dịch tự động (`&tlang=`).
-    for candidate_langs in [&orig_langs, &sub_langs] {
-        if !subs.is_empty() || candidate_langs.is_empty() {
-            break;
-        }
-        let output = std::process::Command::new("yt-dlp")
-            .args([
-                "--skip-download",
-                "--no-playlist",
-                "--write-subs",
-                "--write-auto-subs",
-                "--sub-langs",
-                candidate_langs,
-                "--sub-format",
-                "vtt",
-                "-o",
-            ])
-            .arg(dir.join("%(id)s.%(ext)s"))
-            .arg("--")
-            .arg(format!("https://www.youtube.com/watch?v={id}"))
-            .output()
-            .map_err(ytdlp_unavailable)?;
-        last_output = Some(output);
-        subs = collect_vtts(&dir)?;
-    }
-
-    if subs.is_empty() {
-        return Err(match last_output {
-            Some(output) if !output.status.success() => {
-                host_tool_err("YTDLP_FAILED", stderr_tail(&output.stderr))
-            }
-            _ => host_tool_err(
-                "NO_TRANSCRIPT",
-                format!("Video {id} không có phụ đề cho: {sub_langs}"),
-            ),
-        });
-    }
-    let order: Vec<&str> = sub_langs.split(',').collect();
-    subs.sort_by_key(|p| {
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let rank = order
-            .iter()
-            .position(|l| name.contains(&format!(".{l}.")))
-            .unwrap_or(usize::MAX);
-        (rank, name)
-    });
-    let text = vtt_to_text(
-        &std::fs::read_to_string(&subs[0]).map_err(|e| host_tool_err("IO", e.to_string()))?,
-    );
-    if text.is_empty() {
-        return Err(host_tool_err("NO_TRANSCRIPT", "Phụ đề rỗng"));
-    }
-    Ok(text)
 }

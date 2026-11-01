@@ -34,6 +34,7 @@ pub const COLLECTOR_TOOL_NAMES: &[&str] = &[
     "anydoc_inspect_pdf",
     "yt_list_playlist",
     "yt_fetch_transcript",
+    "collection_status",
     "fetch_html",
     "html_extract_metadata",
     "html_extract_article",
@@ -261,6 +262,7 @@ impl WorkspaceToolKit {
     /// `add_to_sources`, `markdown_create`, `markdown_read`, `image_create`, `tts_synthesize`, `artifact_create`,
     /// và 4 tool `reminder_*` từ `TaskManagerInit`.
     pub fn daily_flow_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>> {
+        self.yt_env.attach_ledger(init.collection_ledger());
         let mut tools = self.wiki_readonly_host_tools();
         tools.extend(self.collector_host_tools());
         tools.push(self.add_to_sources_host_tool());
@@ -283,6 +285,7 @@ impl WorkspaceToolKit {
     /// gồm `anydoc_*`, `yt_*`, `fetch_html`/`html_*`, `add_to_sources`, `markdown_*`, `image_create`,
     /// `tts_synthesize`, `artifact_create`, `reminder_*` và 14 tool `wiki_*`.
     pub fn all_host_tools(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>> {
+        self.yt_env.attach_ledger(init.collection_ledger());
         let mut tools = self.collector_host_tools();
         tools.push(self.add_to_sources_host_tool());
         tools.extend(self.report_host_tools());
@@ -295,6 +298,7 @@ impl WorkspaceToolKit {
     /// Xuất toàn bộ `HostTool` bao gồm cả 6 tool `task_*` (`task_create`, `task_followup`, `task_list`,
     /// `task_detail`, `task_cancel`, `task_delete`) cùng toàn bộ công cụ của [`Self::all_host_tools`].
     pub fn all_host_tools_with_tasks(&self, init: &TaskManagerInit) -> Vec<Arc<dyn HostTool>> {
+        self.yt_env.attach_ledger(init.collection_ledger());
         let mut tools = self.collector_host_tools();
         tools.push(self.add_to_sources_host_tool());
         tools.extend(self.report_host_tools());

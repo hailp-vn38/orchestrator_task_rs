@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use llm_wiki::{
     clip_transcript, sanitize_topic_folder, slugify, WikiEngine, WriteTopicSourceRequest,
-    WriteTopicSourceResponse,
 };
 use orchestrator_agent_rs::{
     HostTool, ToolContext, ToolDescriptor, ToolEffect, ToolError, ToolOutcome,
@@ -14,6 +13,10 @@ use orchestrator_agent_rs::{
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
+use crate::tools::source_identity::{
+    content_sha256, existing_source_tool_outcome, stem_free_of_collision, ExistingReason,
+    SaveSourceOutcome, CONTENT_HASH_KEY,
+};
 use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 
 pub use crate::tools::pdf_convert::{build_sample_technical_pdf, convert_document_with_anydoc};
@@ -144,7 +147,8 @@ impl SharedPdfState {
         raw_topic: &str,
         custom_title: Option<&str>,
         user_tags: Vec<String>,
-    ) -> std::result::Result<WriteTopicSourceResponse, ToolError> {
+        force: bool,
+    ) -> std::result::Result<SaveSourceOutcome, ToolError> {
         let state = Arc::clone(self);
         let docs = tokio::task::spawn_blocking(move || state.ensure_converted(extra_path))
             .await
@@ -185,6 +189,31 @@ impl SharedPdfState {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| doc.file_stem.clone());
 
+        let content_hash = content_sha256(&doc.markdown);
+        if !force {
+            let known = self
+                .engine
+                .find_source_by_frontmatter(CONTENT_HASH_KEY, &content_hash)
+                .map_err(|e| host_tool_err("WIKI_SOURCE_LOOKUP_FAILED", e.to_string()))?;
+            if let Some(found) = known {
+                return Ok(SaveSourceOutcome::Existing {
+                    found,
+                    reason: ExistingReason::SameIdentity,
+                });
+            }
+        }
+        let stem = if force {
+            stem
+        } else {
+            stem_free_of_collision(
+                &self.engine,
+                &topic_folder,
+                &stem,
+                (CONTENT_HASH_KEY, &content_hash),
+                &content_hash[..12],
+            )
+        };
+
         let mut tags = vec!["pdf".to_string(), "anydoc".to_string()];
         for clean in user_tags {
             let clean = clean.trim().to_string();
@@ -197,6 +226,7 @@ impl SharedPdfState {
             ("source_format".to_string(), json!(doc.format_name)),
             ("converter".to_string(), json!("anydoc")),
             ("original_file".to_string(), json!(doc.file_name)),
+            (CONTENT_HASH_KEY.to_string(), json!(content_hash)),
         ];
         let mut header_bullets = vec![
             ("File gốc".to_string(), format!("`{}`", doc.file_name)),
@@ -244,7 +274,7 @@ impl SharedPdfState {
         }
 
         self.autoflow_notify.notify_one();
-        Ok(written)
+        Ok(SaveSourceOutcome::Written(Box::new(written)))
     }
 }
 
@@ -438,8 +468,15 @@ impl HostTool for AnydocSaveToSourcesTool {
                 raw_topic,
                 custom_title,
                 user_tags,
+                false,
             )
             .await?;
+        let written = match written {
+            SaveSourceOutcome::Written(written) => written,
+            SaveSourceOutcome::Existing { found, reason } => {
+                return Ok(existing_source_tool_outcome(&ctx, &found, reason));
+            }
+        };
 
         ctx.progress(&format!(
             "Đã lưu PDF Markdown vào `{}` (docid: {})",

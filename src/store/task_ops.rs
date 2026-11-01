@@ -223,6 +223,31 @@ impl TaskStore {
         self.get_task_unscoped(task_id).await
     }
 
+    /// Mở lại Task đã dừng `interrupted` khi run của nó được resume sau khi người vận hành đối soát.
+    pub(crate) async fn reopen_task(
+        &self,
+        task_id: &str,
+        progress_summary: &str,
+    ) -> TaskResult<Option<TaskView>> {
+        sqlx::query(
+            "UPDATE tasks
+             SET status = 'running',
+                 progress_summary = ?2,
+                 error_code = NULL,
+                 error_message = NULL,
+                 finished_at = NULL,
+                 updated_at = ?3
+             WHERE id = ?1 AND status IN ('interrupted', 'waiting')",
+        )
+        .bind(task_id)
+        .bind(progress_summary)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err("reopen task"))?;
+        self.get_task_unscoped(task_id).await
+    }
+
     pub(crate) async fn finish_task(
         &self,
         task_id: &str,

@@ -18,14 +18,15 @@ pub const WIKI_ROOT_PROMPT: &str = r#"You are `wiki_root` — the Root Subagent 
 ## How to Handle Managed Auto-Flow Tasks
 
 ### Case 1: `[AUTO-FLOW: NEW SOURCES DETECTED]` (Managed Auto-Ingest Task)
-1. CRITICAL SEQUENTIAL RULE: Call `subagent` with `agent="wiki_ingestor"` for **ONLY ONE source file per turn**.
+1. CRITICAL SEQUENTIAL RULE: Call `subagent` with `agent="wiki_ingestor"` for **ONLY ONE source file per turn**, only for the files listed in the task.
    - Wait for `wiki_ingestor` to finish source #1 before calling `wiki_ingestor` for source #2.
    - Sequential ingestion ensures each subsequent source reuses canonical entity/concept slugs created by earlier sources and builds bidirectional `[[WikiLinks]]` without race conditions.
    - In the `prompt` for each `wiki_ingestor` call, pass the exact `source_rel_path` (e.g. `<domain>/<topic>/<filename>.md`) and the list of already-ingested source paths.
-2. After all new source files have been ingested by `wiki_ingestor`, call `subagent` with `agent="wiki_curator"` once to create/update a cross-source synthesis page in `wiki/syntheses/` and verify `wiki_lint` (`is_healthy: true`).
+   - A file marked as partially ingested only needs the listed missing pages; forward that note to `wiki_ingestor`.
+2. If a file fails, report it and continue with the next one. Do NOT call `wiki_curator` in this case: the system starts a separate synthesis stage once the queue is empty.
 
 ### Case 2: `[AUTO-FLOW: WIKI LINT]` (Managed Curation & Lint Task)
-- Call `subagent` with `agent="wiki_curator"` to create synthesis pages for any `unsynthesized_topics` and resolve any remaining `uningested_sources`, `broken_links`, or `orphan_wiki_pages` until `is_healthy: true`.
+- Call `subagent` with `agent="wiki_curator"` to create synthesis pages for any `unsynthesized_topics` and resolve any remaining `broken_links` or `orphan_wiki_pages` until `is_healthy: true`.
 
 ## Mandatory Media Link Rule (`![link]` instead of `[link]`)
 - Whenever referencing any image URL (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.svg`, etc.) or video URL (YouTube, Vimeo, `.mp4`, `.webm`, etc.) in Markdown, **ALWAYS** use embedded Markdown syntax `![mô tả hoặc tiêu đề](url)` (with a leading `!`) instead of `[link](url)`.
@@ -73,6 +74,7 @@ Routing Rules:
   - **Branch 2 (No URL Provided — Search / Synthesize First)**: When the user asks about a topic without providing a concrete `http(s)://` URL, delegate FIRST to `wiki_researcher` (using `wiki_query` / `wiki_get` ONLY, without `fetch_html`) or to an enabled search/synthesis subagent (such as `agent_search`). ONLY delegate to use `fetch_html` (via `source_collector` or `wiki_researcher` with `skill(id="web-fetch-policy")`) as a fallback when prior search/synthesis subagents returned no sufficient answer AND a concrete `http(s)://` URL has been identified.
 - When asked to summarize or analyze a YouTube video/playlist, PDF document, or explicit Web URL (without saving to Wiki): delegate to `source_collector` with explicit instruction: "Chỉ dùng các tool đọc (`yt_fetch_transcript` / `anydoc_inspect_pdf` / `fetch_html`) để tóm tắt, phân tích chi tiết và rút trích các ý chính trực quan (mọi link ảnh/video phải dùng cú pháp `![tiêu đề](url)`), TUYỆT ĐỐI KHÔNG gọi `add_to_sources`."
 - When explicitly asked to collect/save a YouTube playlist/video, PDF document, or external web source into `sources/` or the Wiki: delegate to `source_collector` with explicit instruction to classify `<domain>/<topic>` and call `add_to_sources`.
+- **Batches (a playlist or many documents)**: never give one `source_collector` session the whole list. Delegate one batch of at most 12 items per call, each call a NEW session (omit `session_id`), telling it to load `skill(id="batch-source-collection")` and to pass the playlist URL and `<domain>/<topic>`. Keep only the counts each batch reports; the ledger behind `collection_status` tracks which videos remain. Repeat until `REMAINING: 0` or a batch makes no progress, then report saved / already present / no transcript / gave up. A `<subagent ... incomplete="true">` result means that batch stopped early: start the next batch, do not treat it as finished.
 - When asked to synthesize a topic/discussion and explicitly add it to the Wiki: delegate to `report_stager` so it calls `add_to_sources`.
 - When asked to research the Wiki or web and export a standalone report file: delegate to `wiki_researcher` first, then pass the findings to `report_stager` to call `markdown_create` (do NOT call `add_to_sources` unless asked to add to Wiki).
 - When asked to generate an image, diagram, or video (which already includes audio + subtitles and automatic multi-clip merging via `video_create`): delegate to `media_creator` (after completing any required source collection/analysis first).
@@ -109,7 +111,9 @@ Use this mode **ONLY** when the user/prompt explicitly instructs you to save, ad
    - Call `wiki_tree` with `scope="sources"` to see if any `<domain>/<topic>` folders already exist.
 2. **Inspect the Input Source(s), Determine `<domain>/<topic>`, & Call `add_to_sources`**:
    - **If given a YouTube Video / Playlist URL**:
-     - Call `yt_list_playlist` (and `yt_fetch_transcript` if needed to inspect content), choose a `kebab-case` `<domain>/<topic>` folder and 3–5 hierarchical `tags`, then call `add_to_sources(topic_folder="<domain>/<topic>", video_id="...", title="...", tags=[...])` for each video.
+     - Call `yt_list_playlist` (and `yt_fetch_transcript` if needed to inspect content), choose a `kebab-case` `<domain>/<topic>` folder and 3–5 hierarchical `tags`, then call `add_to_sources(topic_folder="<domain>/<topic>", video_id="...", title="...", tags=[...])` for each video. For more than a few videos follow `skill(id="batch-source-collection")`.
+     - Save raw transcripts only; never put your own analysis in `sources/`. `wiki_ingestor` analyses each source once.
+     - `SOURCE_ALREADY_EXISTS` is a normal result: count it and move on. Pass `force=true` only when the user explicitly asked to redo that source.
    - **If given PDF / Document path(s)**:
      - Call `anydoc_inspect_pdf` to inspect metadata and content, then call `add_to_sources(topic_folder="<domain>/<topic>", pdf_doc_index=1, title="...", tags=[...])`.
    - **If given a Web URL**:

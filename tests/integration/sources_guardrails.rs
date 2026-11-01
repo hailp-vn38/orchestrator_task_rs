@@ -16,6 +16,9 @@ async fn javis_guardrails_provenance_policy_and_autoflow_change_signature() {
     let runtime_cfg = TaskRuntimeConfig {
         scheduler_tick: Duration::from_millis(40),
         autoflow_poll_interval: Duration::from_millis(80),
+        // Nguồn không có tiến độ được thử lại tối đa theo ngưỡng này; đặt 1 để kiểm tra riêng
+        // Change Signature Guard sau khi hết lượt thử.
+        autoflow_max_source_attempts: 1,
         ..Default::default()
     };
 
