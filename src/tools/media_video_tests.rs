@@ -1121,6 +1121,7 @@ struct DurablePhase4Backend {
     seen_resume_batch_index: Arc<Mutex<Vec<u32>>>,
     seen_resume_batch_paths: Arc<Mutex<Vec<Option<String>>>>,
     seen_submit_remote_session_ids: Arc<Mutex<Vec<Option<String>>>>,
+    resume_transient_failures: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl DurablePhase4Backend {
@@ -1133,6 +1134,7 @@ impl DurablePhase4Backend {
             seen_resume_batch_index: Arc::new(Mutex::new(Vec::new())),
             seen_resume_batch_paths: Arc::new(Mutex::new(Vec::new())),
             seen_submit_remote_session_ids: Arc::new(Mutex::new(Vec::new())),
+            resume_transient_failures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -1202,6 +1204,21 @@ impl VideoGeneratorBackend for DurablePhase4Backend {
             .lock()
             .unwrap()
             .push(op.batch_paths_json.clone());
+        let failing = self
+            .resume_transient_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok();
+        if failing {
+            return Err(MediaBackendError::new(
+                "PROVIDER_UNAVAILABLE",
+                "the pinned account is cooling down",
+                true,
+            ));
+        }
         Ok(Self::make_payload(req, req.duration_secs.max(5)))
     }
 
@@ -1217,6 +1234,7 @@ impl VideoGeneratorBackend for DurablePhase4Backend {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn seed_crashed_video_invocation(
     store_dir: &std::path::Path,
     prompt_path: &std::path::Path,
@@ -1488,6 +1506,64 @@ async fn kill_while_running() {
     );
     assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 1);
     assert_eq!(arts.len(), 1);
+    orch.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn transient_resume_failure_waits_instead_of_failing_the_operation() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are a media creator.").unwrap();
+    let store_dir = dir.path().join("orch_store");
+
+    let backend = Arc::new(DurablePhase4Backend::new(
+        SubmittingReconciliation::Unreadable,
+    ));
+    backend.resume_transient_failures.store(1, Ordering::SeqCst);
+    let vid_tool = VideoCreateTool::new(backend.clone()).into_host_tool();
+    let session_id = seed_crashed_video_invocation(
+        &store_dir,
+        &prompt_path,
+        vid_tool.clone(),
+        "running",
+        Some(0),
+        Some("sess-run-1"),
+        0,
+        None,
+        None,
+    )
+    .await;
+
+    let (orch, res, _) =
+        reopen_and_wait_turn(&store_dir, &prompt_path, vid_tool, &session_id).await;
+    assert_eq!(
+        res.status,
+        orchestrator_agent_rs::RunStatus::WaitingRetry,
+        "{res:?}"
+    );
+
+    let caller = orchestrator_agent_rs::CallerContext::new("owner1", "ws1");
+    orch.resume_waiting(&caller, &session_id).await.unwrap();
+    let mut finished = None;
+    for _ in 0..500 {
+        let r = orch
+            .result(&caller, &session_id, "turn-crash")
+            .await
+            .unwrap();
+        if r.status == orchestrator_agent_rs::RunStatus::Completed {
+            finished = Some(r);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(finished.is_some(), "the retried attempt must complete");
+    assert_eq!(backend.resume_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        backend.submit_calls.load(Ordering::SeqCst),
+        0,
+        "a transient failure must not create a second video"
+    );
     orch.shutdown().await.unwrap();
 }
 

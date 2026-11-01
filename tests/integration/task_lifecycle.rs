@@ -423,6 +423,105 @@ async fn task_waiting_cleared_when_orchestrator_resumes() {
     assert_task_waiting_resume(true).await;
 }
 
+#[tokio::test]
+async fn task_keeps_waiting_state_while_child_waits() {
+    use orchestrator_agent_rs::test_support::GatewayError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("prompt.md");
+    std::fs::write(&prompt_path, "You are daily_root.").unwrap();
+
+    let task_cfg =
+        TaskConfig::new(dir.path().join("task_store")).with_default_target("daily", "daily_root");
+    let task_init = TaskManager::prepare(task_cfg).await.unwrap();
+
+    let gw = ScriptedGateway::new();
+    gw.push_tool_calls(
+        "",
+        vec![(
+            "c1",
+            "subagent",
+            json!({ "agent": "worker", "description": "task", "prompt": "do work" }),
+        )],
+    );
+    gw.push_error(GatewayError::Timeout);
+    gw.push_text("child done");
+    gw.push_text("root done");
+
+    let root = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily assistant")
+        .with_prompt_path(&prompt_path)
+        .with_allowed_tools(["subagent"])
+        .with_allowed_subagents(["worker"]);
+    let worker = AgentDefinition::new("worker", "test", "gpt-test")
+        .with_mode(AgentMode::Subagent)
+        .with_description("Worker")
+        .with_prompt_path(&prompt_path);
+
+    let mut llm_cfg = test_llm_config();
+    llm_cfg.providers[0].limits.fast_retries = 0;
+    let mut orch_cfg =
+        OrchestratorConfig::new(llm_cfg, vec![root, worker], dir.path().join("daily_store"));
+    // Tick nhanh để kiểm tra đúng nhánh từng xóa trạng thái chờ của Task.
+    orch_cfg.runtime.snapshot_refresh = Duration::from_millis(50);
+    let orch = Arc::new(
+        Orchestrator::builder(orch_cfg)
+            .with_gateway(gw)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let task_mgr = task_init
+        .register_flow("daily", orch.clone())
+        .start()
+        .await
+        .unwrap();
+    let created = task_mgr
+        .create_task(CreateTaskRequest::new("Job có con", "Chạy subagent"))
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let task = task_mgr.get_task(&created.id).await.unwrap();
+        if task.status == TaskStatus::Waiting {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "task never projected the child wait: {task:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Nhiều tick đi qua mà Task vẫn phải giữ lý do, lịch và trạng thái chờ.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let task = task_mgr.get_task(&created.id).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Waiting, "{task:?}");
+    assert_eq!(task.wait_reason.as_deref(), Some("PROVIDER_TIMEOUT"));
+    assert!(task.next_attempt_at.is_some());
+
+    // Nút "Chạy tiếp" đánh thức con qua session của root.
+    task_mgr
+        .resume_waiting_task_any_scope(&created.id)
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let task = task_mgr.get_task(&created.id).await.unwrap();
+        if task.status == TaskStatus::Completed {
+            assert!(task.wait_reason.is_none());
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "task never completed after resume: {task:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn assert_task_waiting_resume(direct_resume: bool) {
     use orchestrator_agent_rs::test_support::GatewayError;
 

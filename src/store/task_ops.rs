@@ -181,7 +181,7 @@ impl TaskStore {
                  error_message = ?6,
                  finished_at = NULL,
                  updated_at = ?7
-             WHERE id = ?1",
+             WHERE id = ?1 AND status IN ('queued', 'running', 'waiting')",
         )
         .bind(task_id)
         .bind(progress_summary)
@@ -212,7 +212,7 @@ impl TaskStore {
                  error_message = NULL,
                  finished_at = NULL,
                  updated_at = ?3
-             WHERE id = ?1",
+             WHERE id = ?1 AND status = 'waiting'",
         )
         .bind(task_id)
         .bind(progress_summary)
@@ -294,5 +294,83 @@ impl TaskStore {
             return Err(TaskError::not_found(format!("task '{task_id}' not found")));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod waiting_guard_tests {
+    use super::*;
+
+    async fn store_with_running_task() -> (tempfile::TempDir, TaskStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(&dir.path().join("tasks.db")).await.unwrap();
+        store
+            .insert_task(NewTaskRow {
+                id: "t1".into(),
+                scope: TaskScope::new("owner", "ws"),
+                title: "job".into(),
+                prompt: "go".into(),
+                flow_id: "daily".into(),
+                agent_id: "root".into(),
+                source: TaskSource::Api,
+                schedule_id: None,
+                session_id: "s1".into(),
+                latest_turn_id: None,
+                status: TaskStatus::Running,
+                progress_summary: None,
+                related_wiki_links: Vec::new(),
+            })
+            .await
+            .unwrap();
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn late_events_cannot_reopen_a_cancelled_task() {
+        let (_dir, store) = store_with_running_task().await;
+        store
+            .finish_task(
+                "t1",
+                TerminalUpdate {
+                    status: TaskStatus::Cancelled,
+                    output_preview: None,
+                    error_code: Some("CANCELLED"),
+                    error_message: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let cleared = store
+            .clear_task_waiting("t1", "late")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared.status, TaskStatus::Cancelled);
+        assert_eq!(cleared.error_code.as_deref(), Some("CANCELLED"));
+        assert!(cleared.finished_at.is_some());
+
+        let marked = store
+            .mark_task_waiting("t1", Some("PROVIDER_TIMEOUT"), Some(1), "late", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marked.status, TaskStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn clearing_only_applies_to_waiting_tasks() {
+        let (_dir, store) = store_with_running_task().await;
+        store
+            .mark_task_waiting("t1", Some("PROVIDER_TIMEOUT"), Some(1), "wait", None, None)
+            .await
+            .unwrap();
+        let resumed = store
+            .clear_task_waiting("t1", "run")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.status, TaskStatus::Running);
+        assert!(resumed.wait_reason.is_none());
     }
 }

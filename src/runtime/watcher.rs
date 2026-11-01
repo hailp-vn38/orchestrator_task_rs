@@ -109,10 +109,14 @@ async fn run_task_watcher(core: Arc<SharedTaskCore>, initial_task: TaskView) {
 }
 
 async fn emit_task_progress(core: &SharedTaskCore, task: &TaskView, update: ProgressUpdate<'_>) {
-    let _ = core
+    let current = core
         .store
         .clear_task_waiting(&task.id, update.progress_summary.unwrap_or("Running..."))
         .await;
+    // Event còn trong hàng đợi của turn đã hủy không được đưa Task đã kết thúc về `running`.
+    if matches!(&current, Ok(Some(latest)) if latest.status.is_terminal()) {
+        return;
+    }
     let _ = core.store.update_task_progress(&task.id, update).await;
     core.event_bus.emit(TaskEvent::TaskProgress {
         task_id: task.id.clone(),
@@ -284,25 +288,9 @@ async fn handle_execution_event(
                 .or_else(|| ev.payload.get("error_code").and_then(|v| v.as_str()));
             let next_at = ev.payload.get("next_attempt_at").and_then(|v| v.as_i64());
             let err_code = ev.payload.get("error_code").and_then(|v| v.as_str());
-            let summary = match (reason, next_at) {
-                (Some(r), Some(at)) => format!("Waiting ({r}), retry at {at}"),
-                (Some(r), None) => format!("Waiting for user action ({r})"),
-                _ => "Waiting...".to_string(),
-            };
             let _ = core
-                .store
-                .mark_task_waiting(&task.id, reason, next_at, &summary, err_code, None)
+                .project_task_waiting(task, reason, next_at, err_code, None)
                 .await;
-            core.event_bus.emit(TaskEvent::TaskProgress {
-                task_id: task.id.clone(),
-                owner_id: task.owner_id.clone(),
-                workspace_id: task.workspace_id.clone(),
-                status: TaskStatus::Waiting,
-                active_subagent: None,
-                active_tool: None,
-                progress_summary: Some(summary),
-                timestamp_ms: now_ms(),
-            });
             ev.session_id == task.session_id
         }
         "run.completed" | "run.failed" | "run.cancelled" | "run.interrupted" => {

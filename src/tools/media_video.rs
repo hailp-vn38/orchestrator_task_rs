@@ -28,6 +28,30 @@ use crate::tools::wiki_bridge::{host_tool_err, host_tool_outcome};
 /// Video ngắn hơn yêu cầu tối đa chừng này (nửa một clip 10s) vẫn được coi là hoàn tất.
 const VIDEO_DURATION_TOLERANCE_SECS: u32 = 5;
 
+/// Lỗi đọc/ghi journal không chứng minh upstream đã từ chối (ADR 0134): giữ invocation để đối soát.
+fn journal_outcome_unknown(
+    err: orchestrator_agent_rs::ToolError,
+) -> orchestrator_agent_rs::ToolError {
+    host_tool_err(
+        "TOOL_OUTCOME_UNKNOWN",
+        format!(
+            "could not access the durable video operation: {}",
+            err.message
+        ),
+    )
+}
+
+/// Operation đã có việc trên remote để nối lại. `submitting` chỉ tính khi đã có baseline đối soát;
+/// thiếu baseline nghĩa là chưa gửi gì nên báo lỗi thường để model quyết định.
+fn operation_can_resume_later(op: &orchestrator_agent_rs::ToolOperation) -> bool {
+    use orchestrator_agent_rs::ToolOperationStatus as Status;
+    match op.status {
+        Status::Running | Status::Downloading => true,
+        Status::Submitting => op.user_turns_before.is_some(),
+        _ => false,
+    }
+}
+
 /// Giao diện ghi nhật ký tiến trình bền vững vào bảng `tool_operations` của `Orchestrator`.
 #[async_trait::async_trait]
 pub trait VideoOperationJournal: Send + Sync {
@@ -506,16 +530,10 @@ impl HostTool for VideoCreateTool {
 
         let has_op_store = ctx.operation().is_available();
         let existing_op = if has_op_store {
-            ctx.operation().current().await.map_err(|e| {
-                if e.code == "ARTIFACT_UNAVAILABLE" {
-                    host_tool_err(
-                        "TOOL_OUTCOME_UNKNOWN",
-                        "could not read the durable video operation",
-                    )
-                } else {
-                    e
-                }
-            })?
+            ctx.operation()
+                .current()
+                .await
+                .map_err(journal_outcome_unknown)?
         } else {
             None
         };
@@ -545,7 +563,8 @@ impl HostTool for VideoCreateTool {
                             request_json: Some(request_json_str.clone()),
                             ..Default::default()
                         })
-                        .await?;
+                        .await
+                        .map_err(journal_outcome_unknown)?;
                     op.request_json = Some(request_json_str);
                     DispatchAction::Submit(Some(op))
                 }
@@ -617,7 +636,8 @@ impl HostTool for VideoCreateTool {
                                         ),
                                         ..Default::default()
                                     })
-                                    .await?;
+                                    .await
+                                    .map_err(journal_outcome_unknown)?;
                                 running_op.status =
                                     orchestrator_agent_rs::ToolOperationStatus::Running;
                                 DispatchAction::Resume(running_op)
@@ -670,6 +690,19 @@ impl HostTool for VideoCreateTool {
                     Err(e) => {
                         let shutting_down = ctx.cancel_reason()
                             == Some(orchestrator_agent_rs::CancelReason::Shutdown);
+                        if has_op_store && e.retryable && e.code != "VIDEO_GENERATION_TIMEOUT" {
+                            let current = ctx
+                                .operation()
+                                .current()
+                                .await
+                                .map_err(journal_outcome_unknown)?;
+                            if current.as_ref().is_some_and(operation_can_resume_later) {
+                                return Err(host_tool_err(
+                                    orchestrator_agent_rs::CODE_TOOL_RETRY_LATER,
+                                    format!("{}: {}", e.code, e.message),
+                                ));
+                            }
+                        }
                         if has_op_store && e.code != "TOOL_OUTCOME_UNKNOWN"
                             && !(shutting_down && e.code == "CANCELLED") {
                             let status = if e.code == "VIDEO_GENERATION_TIMEOUT" {
@@ -679,8 +712,7 @@ impl HostTool for VideoCreateTool {
                             } else {
                                 orchestrator_agent_rs::ToolOperationStatus::Failed
                             };
-                            let _ = ctx
-                                .operation()
+                            ctx.operation()
                                 .advance(orchestrator_agent_rs::OperationUpdate {
                                     status: Some(status),
                                     result_json: Some(
@@ -688,7 +720,8 @@ impl HostTool for VideoCreateTool {
                                     ),
                                     ..Default::default()
                                 })
-                                .await;
+                                .await
+                                .map_err(journal_outcome_unknown)?;
                         }
                         return Err(host_tool_err(&e.code, e.message));
                     }
@@ -698,7 +731,8 @@ impl HostTool for VideoCreateTool {
                 if has_op_store
                     && ctx.cancel_reason() != Some(orchestrator_agent_rs::CancelReason::Shutdown)
                 {
-                    let _ = ctx
+                    // Người dùng đã hủy nên vẫn trả CANCELLED; sweep dọn operation còn mở sau đó.
+                    if let Err(err) = ctx
                         .operation()
                         .advance(orchestrator_agent_rs::OperationUpdate {
                             status: Some(orchestrator_agent_rs::ToolOperationStatus::Cancelled),
@@ -711,7 +745,10 @@ impl HostTool for VideoCreateTool {
                             ),
                             ..Default::default()
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(code = %err.code, "could not record the cancelled video operation");
+                    }
                 }
                 return Err(host_tool_err(
                     "CANCELLED",
@@ -954,7 +991,8 @@ impl HostTool for VideoCreateTool {
                     ),
                     ..Default::default()
                 })
-                .await?;
+                .await
+                .map_err(journal_outcome_unknown)?;
         }
 
         Ok(host_tool_outcome(&ctx, summary, metadata))
