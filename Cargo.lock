@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "llm-wiki-rs"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "blake3",
  "chrono",
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "orchestrator-flow"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anydoc",
  "async-trait",
