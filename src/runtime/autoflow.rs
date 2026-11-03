@@ -268,6 +268,7 @@ pub(crate) fn spawn_autoflow_loop(
         let target_key = format!("{}/{}", binding.flow_id, binding.agent_id);
         let mut last_attempted_signature: Option<AutoflowVaultSignature> = None;
         let mut last_quarantine: Option<Vec<String>> = None;
+        let mut last_deferred_sources: Option<Vec<String>> = None;
         let mut retry_at: Option<tokio::time::Instant> = None;
 
         loop {
@@ -351,20 +352,35 @@ pub(crate) fn spawn_autoflow_loop(
                 let quarantined = active_quarantine(&core, &binding.engine)
                     .await
                     .unwrap_or_default();
+                let deferred_sources = match deferred_source_paths(&core, &binding.engine).await {
+                    Ok(paths) => paths,
+                    Err(error) => {
+                        warn!("autoflow could not resolve deferred Wiki sources: {error}");
+                        break;
+                    }
+                };
                 // Danh sách cách ly đổi nghĩa là hàng đợi đổi, dù chữ ký Vault giữ nguyên.
                 if last_quarantine.as_ref() != Some(&quarantined) {
                     last_attempted_signature = None;
                     last_quarantine = Some(quarantined.clone());
                 }
+                if last_deferred_sources.as_ref() != Some(&deferred_sources) {
+                    last_attempted_signature = None;
+                    last_deferred_sources = Some(deferred_sources.clone());
+                }
                 if retry_at.is_some_and(|at| tokio::time::Instant::now() >= at) {
                     last_attempted_signature = None;
                     retry_at = None;
                 }
+                let mut excluded_sources = quarantined.clone();
+                excluded_sources.extend(deferred_sources.iter().cloned());
+                excluded_sources.sort();
+                excluded_sources.dedup();
                 let plan = binding.engine.plan_next_autoflow(
                     None,
                     &AutoflowPlanOptions {
                         max_sources: Some(core.config.runtime.autoflow_batch_size),
-                        exclude_sources: &quarantined,
+                        exclude_sources: &excluded_sources,
                     },
                 );
                 let (next_prompt, ingest_batch) = match plan {
@@ -505,4 +521,27 @@ pub(crate) fn spawn_autoflow_loop(
             }
         }
     })
+}
+
+async fn deferred_source_paths(
+    core: &SharedTaskCore,
+    engine: &WikiEngine,
+) -> crate::error::TaskResult<Vec<String>> {
+    let ids = core.store.deferred_wiki_ingest_video_ids().await?;
+    if ids.is_empty() {
+        return core.store.deferred_wiki_ingest_paths().await;
+    }
+    engine
+        .rebuild_or_sync_index_md()
+        .map_err(|error| crate::error::TaskError::storage("sync sources for Auto-Flow", error))?;
+    let mut paths = core.store.deferred_wiki_ingest_paths().await?;
+    if let Ok(sources) = engine.sources_by_frontmatter("video_id") {
+        paths.extend(
+            ids.iter()
+                .filter_map(|id| sources.get(id).map(|source| source.rel_path.clone())),
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }

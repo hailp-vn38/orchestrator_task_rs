@@ -11,6 +11,7 @@ use crate::error::{TaskError, TaskResult};
 
 pub(crate) mod codec;
 mod collection_ops;
+mod deferred_ingest_ops;
 mod followup_ops;
 mod recovery_ops;
 mod schedule_ops;

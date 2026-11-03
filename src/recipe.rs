@@ -90,6 +90,11 @@ pub enum RecipeDecision {
 pub trait TaskRecipe: Send + Sync {
     fn metadata(&self) -> RecipeMetadata;
     fn validate_params(&self, params: &Value) -> Result<Value, RecipeValidationError>;
+    /// Optional concise task title derived from validated parameters. The default keeps the
+    /// registered recipe title/version for recipes without a useful parameter summary.
+    fn title_for_params(&self, _params: &Value) -> Option<String> {
+        None
+    }
     fn next(&self, params: &Value, transcript: &[ModelMessage]) -> RecipeDecision;
     fn progress(&self, params: &Value, transcript: &[ModelMessage]) -> RecipeProgress;
 }

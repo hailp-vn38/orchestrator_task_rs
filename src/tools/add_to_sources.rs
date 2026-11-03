@@ -259,6 +259,10 @@ impl HostTool for AddToSourcesTool {
             .filter(|s| !s.is_empty());
 
         let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+        let defer_wiki_ingest = args
+            .get("defer_wiki_ingest")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         // Nhánh 1: Lưu transcript video YouTube (`video_id`)
         if let Some(video_id) = args
@@ -277,7 +281,15 @@ impl HostTool for AddToSourcesTool {
                 "Đang lưu transcript video YouTube `{video_id}` vào `sources/{raw_topic}/`..."
             ));
             let written = yt_env
-                .save_video_to_sources(video_id, raw_topic, custom_title, custom_stem, tags, force)
+                .save_video_to_sources_with_autoflow(
+                    video_id,
+                    raw_topic,
+                    custom_title,
+                    custom_stem,
+                    tags,
+                    force,
+                    !defer_wiki_ingest,
+                )
                 .await?;
             let written = match written {
                 SaveSourceOutcome::Written(written) => written,
@@ -297,7 +309,7 @@ impl HostTool for AddToSourcesTool {
                     "lines": written.info.line_count,
                     "origin": "youtube",
                     "video_id": video_id,
-                    "autoflow_triggered": true,
+                    "autoflow_triggered": !defer_wiki_ingest,
                 }),
             ));
         }
@@ -494,7 +506,9 @@ impl HostTool for AddToSourcesTool {
             .map_err(|e| host_tool_err("WRITE_SOURCE_ERROR", e.to_string()))?;
 
         // Kích hoạt tức thì Managed Auto-Flow Worker trong `TaskManager`
-        self.autoflow_notify.notify_one();
+        if !defer_wiki_ingest {
+            self.autoflow_notify.notify_one();
+        }
 
         Ok(host_tool_outcome(
             &ctx,
@@ -507,7 +521,7 @@ impl HostTool for AddToSourcesTool {
                 "target_hint": target_hint,
                 "conflict_with": conflict_with,
                 "open_questions_count": open_questions.len(),
-                "autoflow_triggered": true,
+                "autoflow_triggered": !defer_wiki_ingest,
             }),
         ))
     }

@@ -48,7 +48,10 @@ impl TaskManager {
                 ))
             })?;
         if req.title.trim().is_empty() {
-            req.title = format!("{} v{}", metadata.title, metadata.version);
+            req.title = recipe
+                .title_for_params(&params)
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| format!("{} v{}", metadata.title, metadata.version));
         }
         req.prompt = serde_json::to_string(&params).map_err(|e| {
             crate::error::TaskError::invalid_input(format!("serialize recipe parameters: {e}"))

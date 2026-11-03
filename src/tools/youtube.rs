@@ -201,6 +201,30 @@ impl YoutubeCollectorEnv {
         tags: Vec<String>,
         force: bool,
     ) -> Result<SaveSourceOutcome, ToolError> {
+        self.save_video_to_sources_with_autoflow(
+            video_id,
+            raw_topic_folder,
+            custom_title,
+            custom_stem,
+            tags,
+            force,
+            true,
+        )
+        .await
+    }
+
+    /// Save a transcript while optionally suppressing the Auto-Flow wake. Callers that suppress
+    /// the wake must persist a durable deferred-ingest record before this source becomes visible.
+    pub async fn save_video_to_sources_with_autoflow(
+        &self,
+        video_id: &str,
+        raw_topic_folder: &str,
+        custom_title: Option<&str>,
+        custom_stem: Option<&str>,
+        tags: Vec<String>,
+        force: bool,
+        notify_autoflow: bool,
+    ) -> Result<SaveSourceOutcome, ToolError> {
         let known_source = self.find_source(VIDEO_ID_KEY, video_id)?;
         if let (false, Some(found)) = (force, known_source.clone()) {
             self.record_outcome(video_id, ITEM_SAVED, Some(&found.scoped_path), None)
@@ -336,7 +360,9 @@ impl YoutubeCollectorEnv {
         self.record_outcome(video_id, ITEM_SAVED, Some(&written.info.scoped_path), None)
             .await;
 
-        self.autoflow_notify.notify_one();
+        if notify_autoflow {
+            self.autoflow_notify.notify_one();
+        }
         Ok(SaveSourceOutcome::Written(Box::new(written)))
     }
 

@@ -17,6 +17,50 @@ use crate::types::{
 };
 
 impl TaskManager {
+    /// Durably defer automatic Wiki ingestion for a video before its source file is written.
+    pub async fn defer_wiki_ingest_for_video(
+        &self,
+        video_id: &str,
+    ) -> crate::error::TaskResult<()> {
+        self.core.store.defer_wiki_ingest(video_id).await
+    }
+
+    /// Record the source path for a previously deferred video, when the save tool returns it.
+    pub async fn record_deferred_wiki_source_path(
+        &self,
+        video_id: &str,
+        source_rel_path: &str,
+    ) -> crate::error::TaskResult<()> {
+        self.core
+            .store
+            .record_deferred_wiki_source_path(video_id, source_rel_path)
+            .await
+    }
+
+    /// Remove a deferral when a caller explicitly requests Wiki ingestion for this video.
+    pub async fn resume_wiki_ingest_for_video(
+        &self,
+        video_id: &str,
+    ) -> crate::error::TaskResult<()> {
+        self.core.store.resume_wiki_ingest_for_video(video_id).await
+    }
+
+    /// Remove a deferral when an operator explicitly starts ingestion for a source path.
+    pub async fn resume_wiki_ingest_for_source_path(
+        &self,
+        source_rel_path: &str,
+    ) -> crate::error::TaskResult<()> {
+        self.core
+            .store
+            .resume_wiki_ingest_for_path(source_rel_path)
+            .await
+    }
+
+    /// Video identities currently excluded from automatic Wiki ingestion.
+    pub async fn deferred_wiki_ingest_video_ids(&self) -> crate::error::TaskResult<Vec<String>> {
+        self.core.store.deferred_wiki_ingest_video_ids().await
+    }
+
     /// Metadata and step outline for recipes registered by the host at startup.
     pub fn available_recipes(&self) -> Vec<crate::recipe::RecipeMetadata> {
         self.recipes

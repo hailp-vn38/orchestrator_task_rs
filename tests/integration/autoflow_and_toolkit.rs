@@ -173,6 +173,139 @@ async fn schedule_reminder_and_managed_autoflow() {
 }
 
 #[tokio::test]
+async fn deferred_video_source_stays_out_of_autoflow_until_explicitly_resumed() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = WorkspaceLayout::new(dir.path());
+    layout.ensure_dirs().unwrap();
+    let prompt_path = layout.prompts_dir().join("prompt.md");
+    std::fs::write(&prompt_path, "Wiki test agent.").unwrap();
+    let engine = Arc::new(WikiEngine::open(layout.wiki_vault_dir()).unwrap());
+    engine.apply_template(WikiTemplateId::Research).unwrap();
+    let notify = Arc::new(Notify::new());
+    let task_init = TaskManager::prepare(
+        TaskConfig::from_layout(&layout)
+            .with_default_agent("wiki_root")
+            .with_runtime(TaskRuntimeConfig {
+                scheduler_tick: Duration::from_millis(20),
+                autoflow_poll_interval: Duration::from_millis(80),
+                ..Default::default()
+            }),
+    )
+    .await
+    .unwrap();
+    let gateway = ScriptedGateway::new();
+    let agent = AgentDefinition::new("wiki_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_prompt_path(&prompt_path);
+    let orchestrator = Arc::new(
+        Orchestrator::builder(OrchestratorConfig::new(
+            test_llm_config(),
+            vec![agent],
+            layout.orchestrator_store_dir(),
+        ))
+        .with_gateway(gateway.clone())
+        .build()
+        .await
+        .unwrap(),
+    );
+    let manager = task_init
+        .with_orchestrator(orchestrator.clone())
+        .with_wiki_autoflow(WikiAutoFlowBinding::for_agent(
+            engine.clone(),
+            notify.clone(),
+            "wiki_root",
+        ))
+        .start()
+        .await
+        .unwrap();
+
+    manager
+        .defer_wiki_ingest_for_video("deferred-video")
+        .await
+        .unwrap();
+    let deferred = engine
+        .write_topic_source(WriteTopicSourceRequest {
+            topic_folder: "video/collection".into(),
+            file_stem: Some("deferred-video".into()),
+            title: "Deferred video source".into(),
+            tags: vec![],
+            extra_frontmatter: vec![("video_id".into(), json!("deferred-video"))],
+            header_bullets: vec![],
+            body_heading: None,
+            raw_body: "## Transcript\nA long enough source transcript for deferral.".into(),
+            preview_chars: Some(200),
+        })
+        .unwrap();
+    manager
+        .record_deferred_wiki_source_path("deferred-video", &deferred.info.scoped_path)
+        .await
+        .unwrap();
+    notify.notify_one();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let no_autoflow = manager
+        .list_all_tasks(&TaskFilter {
+            source: Some(TaskSource::Autoflow),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        no_autoflow.items.is_empty(),
+        "deferred source must not enter Auto-Flow"
+    );
+
+    let ready = engine
+        .write_topic_source(WriteTopicSourceRequest {
+            topic_folder: "video/collection".into(),
+            file_stem: Some("ready-video".into()),
+            title: "Ready video source".into(),
+            tags: vec![],
+            extra_frontmatter: vec![("video_id".into(), json!("ready-video"))],
+            header_bullets: vec![],
+            body_heading: None,
+            raw_body: "## Transcript\nA long enough source transcript for regular Wiki ingestion."
+                .into(),
+            preview_chars: Some(200),
+        })
+        .unwrap();
+    gateway.push_text("Wiki Auto-Flow accepted the ready source.");
+    notify.notify_one();
+    wait_for_autoflow_source(&manager, &ready.info.scoped_path).await;
+
+    manager
+        .resume_wiki_ingest_for_source_path(&deferred.info.scoped_path)
+        .await
+        .unwrap();
+    gateway.push_text("Wiki Auto-Flow accepted the explicitly resumed source.");
+    notify.notify_one();
+    wait_for_autoflow_source(&manager, &deferred.info.scoped_path).await;
+
+    manager.shutdown().await.unwrap();
+    orchestrator.shutdown().await.unwrap();
+}
+
+async fn wait_for_autoflow_source(manager: &TaskManager, source_path: &str) {
+    for _ in 0..40 {
+        let page = manager
+            .list_all_tasks(&TaskFilter {
+                source: Some(TaskSource::Autoflow),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        if page
+            .items
+            .iter()
+            .any(|task| task.prompt.contains(source_path))
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("Auto-Flow did not create a task for {source_path}");
+}
+
+#[tokio::test]
 async fn workspace_toolkit_provides_reusable_host_tools_out_of_the_box() {
     let dir = tempfile::tempdir().unwrap();
     let layout = WorkspaceLayout::new(dir.path().join("workspace"));
