@@ -45,6 +45,10 @@ pub(crate) fn map_task_row(row: &SqliteRow) -> TaskView {
         source: TaskSource::from_db(&source_raw),
         schedule_id: row.get("schedule_id"),
         session_id: row.get("session_id"),
+        active_session_id: row
+            .try_get("active_session_id")
+            .unwrap_or_else(|_| row.get("session_id")),
+        followup_session_id: row.get("followup_session_id"),
         latest_turn_id: row.get("latest_turn_id"),
         status: TaskStatus::from_db(&status_raw),
         active_subagent: row.get("active_subagent"),

@@ -209,6 +209,8 @@ pub struct TaskAgentSessionView {
     /// `None` nếu là Root Agent của Task; `Some(parent_session_id)` nếu là Subagent con.
     pub parent_session_id: Option<String>,
     pub agent_id: String,
+    /// Whether runs in this session belong to deterministic recipe execution or a free-form turn.
+    pub run_kind: AgentRunKind,
     pub is_root: bool,
     pub archived: bool,
     pub state_revision: i64,
@@ -223,6 +225,11 @@ impl TaskAgentSessionView {
             session_id: snap.session_id.clone(),
             parent_session_id: snap.parent_session_id.clone(),
             agent_id: snap.agent_id.clone(),
+            run_kind: if snap.agent_id.starts_with("recipe_") {
+                AgentRunKind::Recipe
+            } else {
+                AgentRunKind::Free
+            },
             is_root: snap.parent_session_id.is_none(),
             archived: snap.archived,
             state_revision: snap.state_revision,
@@ -273,6 +280,13 @@ impl TaskAgentSessionView {
             })
             .map(|m| m.text.as_str())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunKind {
+    Recipe,
+    Free,
 }
 
 /// Số liệu và trạng thái của lượt chạy (run attempt) mới nhất trên một Agent session.

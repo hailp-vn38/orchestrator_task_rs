@@ -36,6 +36,27 @@ pub(crate) struct TerminalUpdate<'a> {
 }
 
 impl TaskStore {
+    pub(crate) async fn set_followup_session_id(
+        &self,
+        task_id: &str,
+        session_id: &str,
+    ) -> TaskResult<String> {
+        sqlx::query("UPDATE tasks SET followup_session_id = ?2 WHERE id = ?1 AND followup_session_id IS NULL")
+            .bind(task_id)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err("set task follow-up session"))?;
+        let row = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT followup_session_id FROM tasks WHERE id = ?1",
+        )
+        .bind(task_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db_err("read task follow-up session"))?;
+        row.ok_or_else(|| TaskError::not_found(format!("task '{task_id}' not found")))
+    }
+
     pub(crate) async fn insert_task(&self, row: NewTaskRow) -> TaskResult<TaskView> {
         let now = now_ms();
         let started_at = if row.status == TaskStatus::Running {
@@ -48,8 +69,8 @@ impl TaskStore {
             "INSERT INTO tasks (
                 id, owner_id, workspace_id, title, prompt, flow_id, agent_id, source,
                 schedule_id, session_id, latest_turn_id, status, progress_summary,
-                related_wiki_links, created_at, started_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                related_wiki_links, active_session_id, created_at, started_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )
         .bind(&row.id)
         .bind(&row.scope.owner_id)
@@ -65,6 +86,7 @@ impl TaskStore {
         .bind(row.status.as_str())
         .bind(&row.progress_summary)
         .bind(&links_json)
+        .bind(&row.session_id)
         .bind(now)
         .bind(started_at)
         .bind(now)
@@ -82,7 +104,9 @@ impl TaskStore {
             agent_id: row.agent_id,
             source: row.source,
             schedule_id: row.schedule_id,
+            active_session_id: row.session_id.clone(),
             session_id: row.session_id,
+            followup_session_id: None,
             latest_turn_id: row.latest_turn_id,
             status: row.status,
             active_subagent: None,
@@ -130,27 +154,30 @@ impl TaskStore {
     pub(crate) async fn mark_task_turn_running(
         &self,
         task_id: &str,
+        session_id: &str,
         turn_id: &str,
         progress_summary: &str,
     ) -> TaskResult<Option<TaskView>> {
         let now = now_ms();
         sqlx::query(
             "UPDATE tasks
-             SET latest_turn_id = ?2,
+             SET active_session_id = ?2,
+                 latest_turn_id = ?3,
                  status = 'running',
                  active_subagent = NULL,
                  active_tool = NULL,
-                 progress_summary = ?3,
+                 progress_summary = ?4,
                  wait_reason = NULL,
                  next_attempt_at = NULL,
                  error_code = NULL,
                  error_message = NULL,
-                 started_at = COALESCE(started_at, ?4),
+                 started_at = COALESCE(started_at, ?5),
                  finished_at = NULL,
-                 updated_at = ?4
+                 updated_at = ?5
              WHERE id = ?1",
         )
         .bind(task_id)
+        .bind(session_id)
         .bind(turn_id)
         .bind(progress_summary)
         .bind(now)

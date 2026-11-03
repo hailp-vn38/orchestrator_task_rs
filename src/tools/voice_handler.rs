@@ -113,7 +113,14 @@ async fn handle_task_followup(
     let task_id = req_str(args, "task_id")?;
     let prompt = req_str(args, "prompt")?;
     let followup = core
-        .submit_or_enqueue_followup(scope, task_id, prompt.to_string(), TaskSource::Voice)
+        .submit_or_enqueue_followup(
+            scope,
+            task_id,
+            prompt.to_string(),
+            TaskSource::Voice,
+            None,
+            None,
+        )
         .await?;
 
     Ok(json!({
