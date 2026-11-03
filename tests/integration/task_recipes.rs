@@ -1110,6 +1110,187 @@ async fn recipe_playlist_compacts_transcripts_and_uses_the_ledger_for_the_next_b
 }
 
 #[tokio::test]
+async fn stopped_recipe_followup_uses_one_daily_session_with_pinned_recipe_context() {
+    // Regression seam: TaskManager follow-ups on a stopped recipe must create a separate
+    // daily_root session, reuse it, and leave the pinned recipe transcript untouched.
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("agent.md");
+    std::fs::write(&prompt_path, "Test recipe and daily roots").unwrap();
+    let init = TaskManager::prepare(
+        TaskConfig::new(dir.path().join("task_store")).with_default_target("default", "daily_root"),
+    )
+    .await
+    .unwrap()
+    .register_recipe(Arc::new(CompactionPlaylistRecipe))
+    .unwrap();
+    let recipe_root = AgentDefinition::new(
+        "recipe_compaction_playlist",
+        "recipe",
+        "compaction_playlist@1",
+    )
+    .with_mode(AgentMode::Primary)
+    .with_description("Recipe root")
+    .with_prompt_path(&prompt_path)
+    .with_allowed_tools(["collection_status", "yt_fetch_transcript"])
+    .with_steps(1);
+    let daily_root = AgentDefinition::new("daily_root", "test", "gpt-test")
+        .with_mode(AgentMode::Primary)
+        .with_description("Daily assistant")
+        .with_prompt_path(&prompt_path);
+    let orch = Arc::new(
+        Orchestrator::builder(OrchestratorConfig::new(
+            orchestrator_agent_rs::LlmConfig { providers: vec![] },
+            vec![recipe_root, daily_root],
+            dir.path().join("orchestrator_store"),
+        ))
+        .with_provider_runtime(Arc::new(RecipeAndScriptedRuntime {
+            recipes: init.recipe_provider_runtime().unwrap(),
+            allow_agent_response: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            summaries: None,
+        }))
+        .register_tool(Arc::new(CompactionPlaylistTool {
+            name: "collection_status",
+            ledger: Arc::new(CompactionLedger::default()),
+            fake_ytdlp: dir.path().join("unused"),
+        }))
+        .register_tool(Arc::new(CompactionPlaylistTool {
+            name: "yt_fetch_transcript",
+            ledger: Arc::new(CompactionLedger::default()),
+            fake_ytdlp: dir.path().join("unused"),
+        }))
+        .build()
+        .await
+        .unwrap(),
+    );
+    let manager = init
+        .register_flow("default", orch.clone())
+        .start()
+        .await
+        .unwrap();
+    let task = manager
+        .create_task(CreateTaskRequest {
+            recipe: Some(TaskRecipeRequest {
+                id: "compaction_playlist".into(),
+                params: json!({"limit": 4}),
+            }),
+            source: TaskSource::Api,
+            ..CreateTaskRequest::new("Playlist", "{}")
+        })
+        .await
+        .unwrap();
+
+    wait_for_task_status(&manager, &task.id, TaskStatus::Stopped).await;
+    let before = manager.get_task_detail(&task.id).await.unwrap();
+    let recipe_session = before.task.session_id.clone();
+    let progress_before = before.recipe.clone().expect("pinned recipe progress");
+    let followup = manager
+        .send_followup(&task.id, "What was collected?", TaskSource::Api)
+        .await
+        .unwrap();
+    assert_eq!(followup.task_id, task.id);
+    wait_for_task_status(&manager, &task.id, TaskStatus::Completed).await;
+
+    let after = manager.get_task_detail(&task.id).await.unwrap();
+    assert_eq!(
+        after.recipe,
+        Some(progress_before.clone()),
+        "follow-up must preserve recipe progress"
+    );
+    assert_eq!(
+        after.task.session_id, recipe_session,
+        "recipe root session stays pinned"
+    );
+    assert_eq!(
+        after.root_agent.as_ref().unwrap().run_kind,
+        orchestrator_flow_rs::AgentRunKind::Recipe
+    );
+    let free_sessions = after
+        .all_agents()
+        .into_iter()
+        .filter(|session| session.agent_id == "daily_root")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        free_sessions.len(),
+        1,
+        "all follow-ups reuse one daily_root session"
+    );
+    assert_eq!(
+        free_sessions[0].run_kind,
+        orchestrator_flow_rs::AgentRunKind::Free
+    );
+    let followup_history = manager
+        .get_task_agent_history(&task.id, Some(&free_sessions[0].session_id), Some(50))
+        .await
+        .unwrap();
+    let prompt = followup_history
+        .iter()
+        .find(|message| message.role == "user")
+        .unwrap()
+        .text
+        .clone();
+    let context: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+    assert_eq!(
+        context["task_recipe_followup"]["recipe"]["id"],
+        "compaction_playlist"
+    );
+    assert_eq!(context["task_recipe_followup"]["recipe"]["version"], 1);
+    assert_eq!(
+        context["task_recipe_followup"]["recipe"]["params"],
+        json!({"limit": 4})
+    );
+    assert_eq!(
+        context["task_recipe_followup"]["progress"],
+        serde_json::to_value(&progress_before.progress).unwrap()
+    );
+    assert!(context["task_recipe_followup"]["artifacts"].is_array());
+    assert_eq!(context["followup"], "What was collected?");
+
+    manager
+        .send_followup(&task.id, "Continue from the same context.", TaskSource::Api)
+        .await
+        .unwrap();
+    wait_for_task_status(&manager, &task.id, TaskStatus::Completed).await;
+    let after_second = manager.get_task_detail(&task.id).await.unwrap();
+    let free_sessions = after_second
+        .all_agents()
+        .into_iter()
+        .filter(|session| session.agent_id == "daily_root")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        free_sessions.len(),
+        1,
+        "later follow-ups must reuse the first daily_root session"
+    );
+    let history = manager
+        .get_task_agent_history(&task.id, Some(&free_sessions[0].session_id), Some(50))
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter(|message| message.role == "user")
+            .count(),
+        2
+    );
+    assert_eq!(
+        after_second.recipe, after.recipe,
+        "later follow-up must not change recipe progress"
+    );
+    let recipe_history = manager
+        .get_task_agent_history(&task.id, Some(&recipe_session), Some(50))
+        .await
+        .unwrap();
+    assert_eq!(
+        recipe_history
+            .iter()
+            .filter(|message| message.role == "user")
+            .count(),
+        1,
+        "follow-ups never append to the recipe root session"
+    );
+}
+
+#[tokio::test]
 async fn recipe_waits_on_agent_rate_limit_and_resumes_without_repeating_completed_tool_step() {
     let dir = tempfile::tempdir().unwrap();
     let prompt_path = dir.path().join("agent.md");
@@ -1201,7 +1382,7 @@ async fn recipe_uses_the_shared_voice_job_budget_and_keeps_its_partial_result() 
         .with_steps(3);
     let orchestrator = Arc::new(
         Orchestrator::builder(OrchestratorConfig::new(
-            orchestrator_agent_rs::LlmConfig { providers: vec![] },
+            super::test_llm_config(),
             vec![root],
             dir.path().join("orchestrator_store"),
         ))

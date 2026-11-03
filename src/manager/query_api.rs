@@ -343,6 +343,24 @@ impl TaskManager {
         let transcript = model_transcript(&messages);
         let metadata = recipe.metadata();
         let mut progress = recipe.progress(&params, &transcript);
+        let recipe_root_run = if task.followup_session_id.is_some() {
+            let caller = scope.to_caller_context();
+            if let Ok(orch) = self
+                .core
+                .flows()
+                .and_then(|flows| flows.get_flow(&task.flow_id))
+            {
+                orch.snapshot(&caller, &task.session_id)
+                    .await
+                    .ok()
+                    .and_then(|snapshot| snapshot.root.latest_run)
+                    .map(|run| crate::types::TaskAgentRunView::from_run_snapshot(&run))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         match recipe.next(&params, &transcript) {
             crate::recipe::RecipeDecision::Complete(_) => {
@@ -363,19 +381,33 @@ impl TaskManager {
             crate::recipe::RecipeDecision::ToolCalls(_) => {}
         }
 
-        if task.status == crate::types::TaskStatus::Completed {
+        if task.status == crate::types::TaskStatus::Completed && task.followup_session_id.is_none()
+        {
             progress.current_step = None;
             progress.completed_steps = (0..metadata.outline.len()).collect();
             progress.completed_items = progress.total_items;
             progress.stop_reason = None;
             progress.failed_step = None;
-        } else if matches!(
-            task.status,
-            crate::types::TaskStatus::Stopped
-                | crate::types::TaskStatus::Failed
-                | crate::types::TaskStatus::Cancelled
-                | crate::types::TaskStatus::Interrupted
-        ) && progress.stop_reason.is_none()
+        } else if task.followup_session_id.is_some()
+            && recipe_root_run
+                .as_ref()
+                .is_some_and(|run| run.error_code.is_some())
+        {
+            progress.stop_reason =
+                recipe_root_run.and_then(|run| run.error_message.or(run.error_code));
+            if progress.failed_step.is_none() {
+                progress.failed_step = progress.current_step;
+            }
+            progress.current_step = None;
+        } else if task.followup_session_id.is_none()
+            && matches!(
+                task.status,
+                crate::types::TaskStatus::Stopped
+                    | crate::types::TaskStatus::Failed
+                    | crate::types::TaskStatus::Cancelled
+                    | crate::types::TaskStatus::Interrupted
+            )
+            && progress.stop_reason.is_none()
         {
             progress.stop_reason = task
                 .error_message

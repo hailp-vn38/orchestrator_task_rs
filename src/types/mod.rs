@@ -13,8 +13,8 @@ pub use artifact::{
 };
 pub use event::{TaskEvent, TaskFeedItem, TaskSubscription};
 pub use execution::{
-    TaskAgentMessageView, TaskAgentRunView, TaskAgentSessionView, TaskExecutionSummary,
-    TaskMessageToolCallView, TaskToolInvocationView,
+    AgentRunKind, TaskAgentMessageView, TaskAgentRunView, TaskAgentSessionView,
+    TaskExecutionSummary, TaskMessageToolCallView, TaskToolInvocationView,
 };
 pub use schedule::{
     CreateScheduleRequest, Priority, ScheduleActionKind, ScheduleFilter, ScheduleKind,

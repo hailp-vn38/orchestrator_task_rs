@@ -65,8 +65,7 @@ impl TaskManager {
         source: TaskSource,
     ) -> TaskResult<FollowupView> {
         let scope = &self.core.config.default_scope;
-        self.core
-            .submit_or_enqueue_followup(scope, task_id, prompt.into(), source)
+        self.send_followup_scoped(scope, task_id, prompt, source)
             .await
     }
 
@@ -78,8 +77,22 @@ impl TaskManager {
         prompt: impl Into<String>,
         source: TaskSource,
     ) -> TaskResult<FollowupView> {
+        let prompt = prompt.into();
+        if let Some(recipe_context) = self.recipe_followup_prompt(scope, task_id, &prompt).await? {
+            return self
+                .core
+                .submit_or_enqueue_followup(
+                    scope,
+                    task_id,
+                    prompt,
+                    source,
+                    Some("daily_root"),
+                    Some(recipe_context),
+                )
+                .await;
+        }
         self.core
-            .submit_or_enqueue_followup(scope, task_id, prompt.into(), source)
+            .submit_or_enqueue_followup(scope, task_id, prompt, source, None, None)
             .await
     }
 
@@ -93,6 +106,42 @@ impl TaskManager {
         let scope = self.core.resolve_task_scope(task_id).await?;
         self.send_followup_scoped(&scope, task_id, prompt, source)
             .await
+    }
+
+    async fn recipe_followup_prompt(
+        &self,
+        scope: &TaskScope,
+        task_id: &str,
+        prompt: &str,
+    ) -> TaskResult<Option<String>> {
+        let task = self.get_task_scoped(scope, task_id).await?;
+        if !task.agent_id.starts_with("recipe_") {
+            return Ok(None);
+        }
+        let detail = self.get_task_detail_scoped(scope, task_id).await?;
+        let recipe = detail.recipe.as_ref().ok_or_else(|| {
+            crate::error::TaskError::invalid_state(
+                "the pinned task recipe is unavailable for follow-up context",
+            )
+        })?;
+        if detail.task.followup_session_id.is_some() {
+            return Ok(Some(prompt.to_string()));
+        }
+        let context = serde_json::json!({
+            "task_recipe_followup": {
+                "recipe": {"id": recipe.id, "version": recipe.version, "params": recipe.params},
+                "progress": recipe.progress,
+                "artifacts": detail.artifacts,
+            },
+            "followup": prompt,
+        });
+        serde_json::to_string_pretty(&context)
+            .map(Some)
+            .map_err(|error| {
+                crate::error::TaskError::invalid_input(format!(
+                    "serialize recipe follow-up context: {error}"
+                ))
+            })
     }
 
     /// Tiếp tục ngay một Task đang ở trạng thái chờ (`waiting_retry` hoặc `waiting_user`) trong `default_scope`.

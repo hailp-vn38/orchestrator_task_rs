@@ -97,20 +97,36 @@ impl SharedTaskCore {
         let task = self.store.get_task(scope, task_id).await?;
         let task_scope = TaskScope::new(&task.owner_id, &task.workspace_id);
         let followups = self.store.list_followups(&task.id).await?;
-        let (family_snapshot, artifacts) = if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
-            let caller = task_scope.to_caller_context();
-            let snap = orch.snapshot(&caller, &task.session_id).await.ok();
-            let arts = orch
-                .list_family_artifacts(&caller, &task.session_id)
-                .await
-                .unwrap_or_default()
-                .iter()
-                .map(|fa| TaskArtifactView::from_family_artifact(&task.id, fa))
-                .collect();
-            (snap, arts)
-        } else {
-            (None, Vec::new())
-        };
+        let (family_snapshot, artifacts, followup_snapshot, followup_artifacts) =
+            if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
+                let caller = task_scope.to_caller_context();
+                let snap = orch.snapshot(&caller, &task.session_id).await.ok();
+                let arts = orch
+                    .list_family_artifacts(&caller, &task.session_id)
+                    .await
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|fa| TaskArtifactView::from_family_artifact(&task.id, fa))
+                    .collect();
+                let followup = if let Some(session_id) = task.followup_session_id.as_deref() {
+                    orch.snapshot(&caller, session_id).await.ok()
+                } else {
+                    None
+                };
+                let followup_arts = if let Some(session_id) = task.followup_session_id.as_deref() {
+                    orch.list_family_artifacts(&caller, session_id)
+                        .await
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|fa| TaskArtifactView::from_family_artifact(&task.id, fa))
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                (snap, arts, followup, followup_arts)
+            } else {
+                (None, Vec::new(), None, Vec::new())
+            };
 
         let max_resume_attempts = self
             .flows()?
@@ -119,6 +135,14 @@ impl SharedTaskCore {
             .map(|orch| orch.max_resume_attempts());
         let mut detail =
             TaskDetailView::from_parts_with_artifacts(task, followups, family_snapshot, artifacts);
+        if let Some(snapshot) = followup_snapshot {
+            detail
+                .followup_agents
+                .push(crate::types::TaskAgentSessionView::from_session_snapshot(
+                    &snapshot.root,
+                ));
+        }
+        detail.artifacts.extend(followup_artifacts);
         detail.max_resume_attempts = max_resume_attempts;
         Ok(detail)
     }
@@ -412,6 +436,12 @@ impl SharedTaskCore {
         let target_session_id = match session_or_agent_id.map(str::trim).filter(|s| !s.is_empty()) {
             None => task.session_id.clone(),
             Some(key) if key == task.session_id || key == task.agent_id => task.session_id.clone(),
+            Some(key)
+                if task.followup_session_id.as_deref() == Some(key)
+                    || key == "daily_root" && task.followup_session_id.is_some() =>
+            {
+                task.followup_session_id.clone().unwrap_or_default()
+            }
             Some(key) => {
                 let snap = orch.snapshot(&caller, &task.session_id).await?;
                 if let Some(child) = snap.children.iter().find(|c| c.session_id == key) {
