@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use orchestrator_agent_rs::{
@@ -110,6 +112,200 @@ impl TaskRecipe for RetryRecipe {
             current_step: None,
             completed_steps: vec![],
             summary: None,
+            stop_reason: None,
+            failed_step: None,
+        }
+    }
+}
+
+const COMPACTION_VIDEO_IDS: [&str; 4] = ["video-a", "video-b", "video-c", "video-d"];
+
+#[derive(Default)]
+struct CompactionLedger {
+    fetched: Mutex<HashSet<String>>,
+    remaining_observations: Mutex<Vec<usize>>,
+}
+
+struct CompactionPlaylistTool {
+    name: &'static str,
+    ledger: Arc<CompactionLedger>,
+}
+
+#[async_trait]
+impl HostTool for CompactionPlaylistTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: self.name.into(),
+            description: "Test playlist ledger and yt-dlp transcript output.".into(),
+            input_schema: json!({
+                "type":"object",
+                "properties":{"video_id":{"type":"string"}}
+            }),
+            effect: ToolEffect::ReadOnly,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _context: ToolContext,
+        args: serde_json::Value,
+    ) -> Result<ToolOutcome, ToolError> {
+        let content = match self.name {
+            "collection_status" => {
+                let fetched = self.ledger.fetched.lock().unwrap();
+                let next: Vec<_> = COMPACTION_VIDEO_IDS
+                    .iter()
+                    .filter(|id| !fetched.contains(**id))
+                    .collect();
+                self.ledger
+                    .remaining_observations
+                    .lock()
+                    .unwrap()
+                    .push(next.len());
+                let entries = next
+                    .iter()
+                    .enumerate()
+                    .map(|(index, id)| format!("{}. video_id={} title=Video {}", index + 1, id, id))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "TOTAL: {} | REMAINING: {}\nNEXT:\n{}",
+                    COMPACTION_VIDEO_IDS.len(),
+                    next.len(),
+                    entries
+                )
+            }
+            "yt_fetch_transcript" => {
+                let Some(video_id) = args.get("video_id").and_then(serde_json::Value::as_str)
+                else {
+                    return Err(ToolError {
+                        code: "INVALID_ARGS".into(),
+                        message: "video_id is required".into(),
+                    });
+                };
+                self.ledger
+                    .fetched
+                    .lock()
+                    .unwrap()
+                    .insert(video_id.to_owned());
+                format!(
+                    "TRANSCRIPT {video_id}\n{}",
+                    "subtitle line with useful words ".repeat(900)
+                )
+            }
+            _ => {
+                return Err(ToolError {
+                    code: "UNKNOWN_TOOL".into(),
+                    message: self.name.into(),
+                })
+            }
+        };
+        Ok(ToolOutcome {
+            call_id: String::new(),
+            content,
+            metadata: json!({}),
+        })
+    }
+}
+
+struct CompactionPlaylistRecipe;
+
+impl TaskRecipe for CompactionPlaylistRecipe {
+    fn metadata(&self) -> RecipeMetadata {
+        RecipeMetadata {
+            id: "compaction_playlist".into(),
+            version: 1,
+            title: "Compaction playlist".into(),
+            description: "Collects a playlist in ledger-backed batches.".into(),
+            params_schema: json!({"type":"object", "properties":{}}),
+            outline: vec![RecipeStepOutline {
+                title: "Fetch transcripts".into(),
+                kind: RecipeStepKind::Tool,
+                repeat: true,
+                host_tools: vec!["collection_status".into(), "yt_fetch_transcript".into()],
+                sub_agents: vec![],
+            }],
+            max_steps: 16,
+        }
+    }
+
+    fn validate_params(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RecipeValidationError> {
+        Ok(params.clone())
+    }
+
+    fn next(&self, _params: &serde_json::Value, transcript: &[ModelMessage]) -> RecipeDecision {
+        let latest_status = transcript.iter().enumerate().rev().find(|(_, message)| {
+            message.role == ModelRole::Tool
+                && message.tool_name.as_deref() == Some("collection_status")
+        });
+        let latest_fetch = transcript.iter().enumerate().rev().find(|(_, message)| {
+            message.role == ModelRole::Tool
+                && message.tool_name.as_deref() == Some("yt_fetch_transcript")
+        });
+        if latest_status.is_none()
+            || latest_fetch.is_some_and(|(index, _)| index > latest_status.unwrap().0)
+        {
+            return RecipeDecision::ToolCalls(vec![ModelToolCall {
+                id: format!("status-{}", transcript.len()),
+                name: "collection_status".into(),
+                arguments: json!({}),
+            }]);
+        }
+
+        let status = latest_status.unwrap().1;
+        let next = status
+            .text
+            .split("NEXT:")
+            .nth(1)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split("video_id=").nth(1)?.split_whitespace().next())
+            .take(2)
+            .collect::<Vec<_>>();
+        if next.is_empty() {
+            return RecipeDecision::Complete(format!(
+                "Fetched {} playlist transcripts.",
+                COMPACTION_VIDEO_IDS.len()
+            ));
+        }
+        RecipeDecision::ToolCalls(
+            next.into_iter()
+                .enumerate()
+                .map(|(index, video_id)| ModelToolCall {
+                    id: format!("fetch-{video_id}-{}-{index}", transcript.len()),
+                    name: "yt_fetch_transcript".into(),
+                    arguments: json!({"video_id":video_id}),
+                })
+                .collect(),
+        )
+    }
+
+    fn progress(&self, _params: &serde_json::Value, transcript: &[ModelMessage]) -> RecipeProgress {
+        let latest_status = transcript.iter().rev().find(|message| {
+            message.role == ModelRole::Tool
+                && message.tool_name.as_deref() == Some("collection_status")
+        });
+        let remaining = latest_status
+            .and_then(|message| message.text.split("REMAINING: ").nth(1))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<usize>().ok());
+        RecipeProgress {
+            current_step: remaining.filter(|remaining| *remaining > 0).map(|_| 0),
+            completed_steps: if remaining == Some(0) {
+                vec![0]
+            } else {
+                vec![]
+            },
+            summary: remaining.map(|remaining| {
+                format!(
+                    "{} of {} transcripts remain",
+                    remaining,
+                    COMPACTION_VIDEO_IDS.len()
+                )
+            }),
             stop_reason: None,
             failed_step: None,
         }
@@ -397,6 +593,7 @@ impl HostTool for SlowTool {
 struct RecipeAndScriptedRuntime {
     recipes: Arc<orchestrator_flow_rs::RecipeProviderRuntime>,
     allow_agent_response: Arc<std::sync::atomic::AtomicBool>,
+    summaries: Option<Arc<ScriptedGateway>>,
 }
 
 #[async_trait]
@@ -414,7 +611,18 @@ impl ProviderRuntime for RecipeAndScriptedRuntime {
         cancel: &tokio_util::sync::CancellationToken,
         sink: StreamSink<'_>,
     ) -> Result<ModelResponse, GatewayError> {
-        if request.provider_id == "recipe" {
+        if ScriptedGateway::is_summary_request(request) {
+            orchestrator_agent_rs::test_support::LlmGateway::complete(
+                self.summaries
+                    .as_ref()
+                    .expect("summary requests must be routed to the scripted gateway")
+                    .as_ref(),
+                request,
+                cancel,
+                sink,
+            )
+            .await
+        } else if request.provider_id == "recipe" {
             self.recipes.complete(request, cancel, sink).await
         } else if self.allow_agent_response.load(Ordering::SeqCst) {
             Ok(ModelResponse {
@@ -429,6 +637,102 @@ impl ProviderRuntime for RecipeAndScriptedRuntime {
             })
         }
     }
+}
+
+#[tokio::test]
+async fn recipe_playlist_compacts_transcripts_and_uses_the_ledger_for_the_next_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("agent.md");
+    std::fs::write(&prompt_path, "Test recipe root").unwrap();
+    let ledger = Arc::new(CompactionLedger::default());
+    let task_init = TaskManager::prepare(TaskConfig::new(dir.path().join("task_store")))
+        .await
+        .unwrap()
+        .register_recipe(Arc::new(CompactionPlaylistRecipe))
+        .unwrap();
+    let root = AgentDefinition::new(
+        "recipe_compaction_playlist",
+        "recipe",
+        "compaction_playlist@1",
+    )
+    .with_mode(AgentMode::Primary)
+    .with_description("Playlist recipe with a ledger-backed batch")
+    .with_prompt_path(&prompt_path)
+    .with_allowed_tools(["collection_status", "yt_fetch_transcript"])
+    .with_steps(16)
+    .with_context_limit_tokens(2_000);
+    let mut config = OrchestratorConfig::new(
+        orchestrator_agent_rs::LlmConfig { providers: vec![] },
+        vec![root],
+        dir.path().join("orchestrator_store"),
+    );
+    config.runtime.context_limit_tokens = 2_000;
+    config.runtime.compaction_threshold_percent = 30;
+    config.runtime.compaction_keep_recent = 1;
+    let scripted = ScriptedGateway::new();
+    let orchestrator = Arc::new(
+        Orchestrator::builder(config)
+            .with_provider_runtime(Arc::new(RecipeAndScriptedRuntime {
+                recipes: task_init.recipe_provider_runtime().unwrap(),
+                allow_agent_response: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                summaries: Some(scripted.clone()),
+            }))
+            .register_tool(Arc::new(CompactionPlaylistTool {
+                name: "collection_status",
+                ledger: ledger.clone(),
+            }))
+            .register_tool(Arc::new(CompactionPlaylistTool {
+                name: "yt_fetch_transcript",
+                ledger: ledger.clone(),
+            }))
+            .build()
+            .await
+            .unwrap(),
+    );
+    let manager = task_init
+        .register_flow("default", orchestrator.clone())
+        .start()
+        .await
+        .unwrap();
+
+    let created = manager
+        .create_task(CreateTaskRequest {
+            recipe: Some(TaskRecipeRequest {
+                id: "compaction_playlist".into(),
+                params: json!({}),
+            }),
+            ..CreateTaskRequest::new("", "")
+        })
+        .await
+        .unwrap();
+    wait_for_task_status(&manager, &created.id, TaskStatus::Completed).await;
+
+    let fetched = ledger.fetched.lock().unwrap().clone();
+    assert_eq!(
+        fetched,
+        COMPACTION_VIDEO_IDS
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(
+        *ledger.remaining_observations.lock().unwrap(),
+        vec![4, 2, 0],
+        "the recipe must ask the ledger for each next batch after compaction"
+    );
+    assert!(
+        scripted.summary_requests().len() >= 1,
+        "large yt-dlp transcript output must trigger runtime compaction"
+    );
+    let detail = manager.get_task_detail(&created.id).await.unwrap();
+    assert_eq!(detail.task.status, TaskStatus::Completed);
+    assert_eq!(
+        detail.task.output_preview.as_deref(),
+        Some("Fetched 4 playlist transcripts.")
+    );
+
+    manager.shutdown().await.unwrap();
+    orchestrator.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -464,6 +768,7 @@ async fn recipe_waits_on_agent_rate_limit_and_resumes_without_repeating_complete
     .with_provider_runtime(Arc::new(RecipeAndScriptedRuntime {
         recipes: task_init.recipe_provider_runtime().unwrap(),
         allow_agent_response: allow_agent_response.clone(),
+        summaries: None,
     }));
     builder = builder.register_tool(Arc::new(RecipeReadTool(read_count.clone())));
     let orchestrator = Arc::new(builder.build().await.unwrap());
