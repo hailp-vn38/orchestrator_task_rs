@@ -1147,6 +1147,7 @@ async fn stopped_recipe_followup_uses_one_daily_session_with_pinned_recipe_conte
             recipes: init.recipe_provider_runtime().unwrap(),
             allow_agent_response: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             summaries: None,
+            scripted_agents: None,
         }))
         .register_tool(Arc::new(CompactionPlaylistTool {
             name: "collection_status",
