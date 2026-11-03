@@ -736,7 +736,20 @@ impl HostTool for YtFetchTranscriptTool {
         ctx.progress(&format!(
             "Đang tải transcript bằng yt-dlp cho video `{video_id}` (chế độ ReadOnly)..."
         ));
-        let transcript = self.env.get_or_fetch_transcript(&video_id).await?;
+        let transcript = match self.env.get_or_fetch_transcript(&video_id).await {
+            Ok(transcript) => transcript,
+            Err(error) => {
+                let status = if error.code == "NO_TRANSCRIPT" {
+                    ITEM_NO_TRANSCRIPT
+                } else {
+                    ITEM_FAILED
+                };
+                self.env
+                    .record_outcome(&video_id, status, None, Some(&error.message))
+                    .await;
+                return Err(error);
+            }
+        };
 
         let char_count = transcript.chars().count();
         let line_count = transcript.lines().count();

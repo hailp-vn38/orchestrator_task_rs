@@ -25,6 +25,13 @@ pub struct RecipeStepOutline {
     pub kind: RecipeStepKind,
     #[serde(default)]
     pub repeat: bool,
+    /// HostTools explicitly used by this step. Server startup validates these against the
+    /// complete registered tool catalog before building the Orchestrator.
+    #[serde(default)]
+    pub host_tools: Vec<String>,
+    /// Sub-Agent definitions explicitly used by this step.
+    #[serde(default)]
+    pub sub_agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,6 +138,56 @@ impl RecipeProviderRuntime {
         let _ = id;
         Ok(recipe)
     }
+}
+
+/// Validate the references declared by recipe outlines against the host's real catalogs.
+/// This is called by the server after assembling all tools and agent definitions, before build.
+pub fn validate_recipe_registry(
+    recipes: &[Arc<dyn TaskRecipe>],
+    registered_tools: &std::collections::HashSet<String>,
+    registered_agents: &std::collections::HashSet<String>,
+) -> Result<(), RecipeValidationError> {
+    for recipe in recipes {
+        let metadata = recipe.metadata();
+        for (step_index, step) in metadata.outline.iter().enumerate() {
+            let path = format!("outline[{step_index}]");
+            match step.kind {
+                RecipeStepKind::Tool => {
+                    if step.host_tools.is_empty() || !step.sub_agents.is_empty() {
+                        return Err(validation(
+                            &path,
+                            "tool steps must declare HostTools and cannot declare Sub-Agents",
+                        ));
+                    }
+                    for tool in &step.host_tools {
+                        if !registered_tools.contains(tool) {
+                            return Err(validation(
+                                &format!("{path}.host_tools.{tool}"),
+                                "recipe outline references an unregistered HostTool",
+                            ));
+                        }
+                    }
+                }
+                RecipeStepKind::Agent => {
+                    if step.sub_agents.is_empty() || !step.host_tools.is_empty() {
+                        return Err(validation(
+                            &path,
+                            "agent steps must declare Sub-Agents and cannot declare HostTools",
+                        ));
+                    }
+                    for agent in &step.sub_agents {
+                        if !registered_agents.contains(agent) {
+                            return Err(validation(
+                                &format!("{path}.sub_agents.{agent}"),
+                                "recipe outline references an unregistered Sub-Agent",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -415,6 +472,8 @@ mod tests {
                     title: "List videos".into(),
                     kind: RecipeStepKind::Tool,
                     repeat: false,
+                    host_tools: vec!["yt_list_playlist".into()],
+                    sub_agents: vec![],
                 }],
                 max_steps: 4,
             }
@@ -510,5 +569,54 @@ mod tests {
         }))
         .unwrap_err();
         assert_eq!(err.validation_path, "params_schema.properties.payload.type");
+    }
+
+    #[test]
+    fn registry_rejects_outline_references_missing_host_tools_and_subagents() {
+        let recipe: Arc<dyn TaskRecipe> = Arc::new(OneCallRecipe);
+        let error = validate_recipe_registry(
+            &[Arc::clone(&recipe)],
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.validation_path,
+            "outline[0].host_tools.yt_list_playlist"
+        );
+
+        struct AgentRecipe;
+        impl TaskRecipe for AgentRecipe {
+            fn metadata(&self) -> RecipeMetadata {
+                let mut metadata = OneCallRecipe.metadata();
+                metadata.outline = vec![RecipeStepOutline {
+                    title: "Classify".into(),
+                    kind: RecipeStepKind::Agent,
+                    repeat: false,
+                    host_tools: vec![],
+                    sub_agents: vec!["video_classifier".into()],
+                }];
+                metadata
+            }
+            fn validate_params(&self, params: &Value) -> Result<Value, RecipeValidationError> {
+                OneCallRecipe.validate_params(params)
+            }
+            fn next(&self, params: &Value, transcript: &[ModelMessage]) -> RecipeDecision {
+                OneCallRecipe.next(params, transcript)
+            }
+            fn progress(&self, params: &Value, transcript: &[ModelMessage]) -> RecipeProgress {
+                OneCallRecipe.progress(params, transcript)
+            }
+        }
+        let error = validate_recipe_registry(
+            &[Arc::new(AgentRecipe)],
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.validation_path,
+            "outline[0].sub_agents.video_classifier"
+        );
     }
 }

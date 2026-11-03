@@ -10,7 +10,9 @@ use tokio::task::JoinHandle;
 
 use crate::error::TaskResult;
 use crate::owner_lock::OwnerLock;
-use crate::recipe::{validate_recipe_schema, RecipeProviderRuntime, TaskRecipe};
+use crate::recipe::{
+    validate_recipe_registry, validate_recipe_schema, RecipeProviderRuntime, TaskRecipe,
+};
 use crate::runtime::{SharedTaskCore, WikiAutoFlowBinding};
 
 mod dispatch;
@@ -67,5 +69,17 @@ impl TaskManagerInit {
             .map_err(|e| {
                 crate::error::TaskError::config(format!("{}: {}", e.validation_path, e.message))
             })
+    }
+
+    /// Validate explicit recipe outline dependencies against the server's complete catalogs.
+    pub fn validate_recipe_registry(
+        &self,
+        registered_tools: &std::collections::HashSet<String>,
+        registered_agents: &std::collections::HashSet<String>,
+    ) -> TaskResult<()> {
+        let recipes = self.recipes.values().cloned().collect::<Vec<_>>();
+        validate_recipe_registry(&recipes, registered_tools, registered_agents).map_err(|e| {
+            crate::error::TaskError::config(format!("{}: {}", e.validation_path, e.message))
+        })
     }
 }
