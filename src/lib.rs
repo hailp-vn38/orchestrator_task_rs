@@ -50,6 +50,7 @@ mod error;
 mod manager;
 mod owner_lock;
 pub mod prompts;
+mod recipe;
 mod runtime;
 mod store;
 mod tools;
@@ -64,6 +65,10 @@ pub use prompts::{
     MEDIA_CREATOR_PROMPT, MEDIA_PROCESSOR_PROMPT, REMINDER_PLANNER_PROMPT, REPORT_STAGER_PROMPT,
     SOURCE_COLLECTOR_PROMPT, WIKI_CURATOR_PROMPT, WIKI_INGESTOR_PROMPT, WIKI_RESEARCHER_PROMPT,
     WIKI_ROOT_PROMPT,
+};
+pub use recipe::{
+    validate_recipe_params, validate_recipe_schema, RecipeDecision, RecipeMetadata, RecipeProgress,
+    RecipeProviderRuntime, RecipeStepKind, RecipeStepOutline, RecipeValidationError, TaskRecipe,
 };
 pub use runtime::WikiAutoFlowBinding;
 pub use tools::{
@@ -102,7 +107,7 @@ pub use types::{
     TaskAgentRunView, TaskAgentSessionView, TaskArtifactCatalogEntry, TaskArtifactCatalogPage,
     TaskArtifactCatalogSummary, TaskArtifactDownload, TaskArtifactFilter, TaskArtifactKind,
     TaskArtifactRole, TaskArtifactView, TaskDetailView, TaskEvent, TaskExecutionSummary,
-    TaskFeedItem, TaskFilter, TaskMessageToolCallView, TaskPage, TaskScope, TaskSource, TaskStatus,
-    TaskSubscription, TaskToolInvocationView, TaskView, WikiDeleteOutcome, DEFAULT_OWNER_ID,
-    DEFAULT_WORKSPACE_ID,
+    TaskFeedItem, TaskFilter, TaskMessageToolCallView, TaskPage, TaskRecipeRequest, TaskScope,
+    TaskSource, TaskStatus, TaskSubscription, TaskToolInvocationView, TaskView, WikiDeleteOutcome,
+    DEFAULT_OWNER_ID, DEFAULT_WORKSPACE_ID,
 };

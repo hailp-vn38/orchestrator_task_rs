@@ -12,7 +12,9 @@ impl TaskManager {
     /// Tạo và chạy ngay một Task với `default_scope` (`"personal"`, `"homelab"`).
     pub async fn create_task(&self, req: CreateTaskRequest) -> TaskResult<TaskView> {
         let scope = &self.core.config.default_scope;
-        self.core.create_and_start_task(scope, req).await
+        self.core
+            .create_and_start_task(scope, self.prepare_recipe_task(req)?)
+            .await
     }
 
     /// Tạo và chạy ngay một Task với `TaskScope` chỉ định.
@@ -21,7 +23,38 @@ impl TaskManager {
         scope: &TaskScope,
         req: CreateTaskRequest,
     ) -> TaskResult<TaskView> {
-        self.core.create_and_start_task(scope, req).await
+        self.core
+            .create_and_start_task(scope, self.prepare_recipe_task(req)?)
+            .await
+    }
+
+    fn prepare_recipe_task(&self, mut req: CreateTaskRequest) -> TaskResult<CreateTaskRequest> {
+        let Some(recipe_request) = req.recipe.take() else {
+            return Ok(req);
+        };
+        let recipe = self.recipes.get(&recipe_request.id).ok_or_else(|| {
+            crate::error::TaskError::invalid_input(format!(
+                "recipe '{}' is not registered",
+                recipe_request.id
+            ))
+        })?;
+        let metadata = recipe.metadata();
+        let params = recipe
+            .validate_params(&recipe_request.params)
+            .map_err(|err| {
+                crate::error::TaskError::invalid_input(format!(
+                    "validation_path={}: {}",
+                    err.validation_path, err.message
+                ))
+            })?;
+        if req.title.trim().is_empty() {
+            req.title = format!("{} v{}", metadata.title, metadata.version);
+        }
+        req.prompt = serde_json::to_string(&params).map_err(|e| {
+            crate::error::TaskError::invalid_input(format!("serialize recipe parameters: {e}"))
+        })?;
+        req.target_agent = Some(format!("recipe_{}", metadata.id));
+        Ok(req)
     }
 
     /// Gửi lệnh bổ sung (Followup) vào Task trong `default_scope`.

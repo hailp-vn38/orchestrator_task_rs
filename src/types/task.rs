@@ -111,6 +111,9 @@ pub struct CreateTaskRequest {
     /// Nếu truyền `session_id` có sẵn, Task sẽ submit turn mới vào session đó.
     pub existing_session_id: Option<String>,
     pub related_wiki_links: Vec<String>,
+    /// Recipe đã đăng ký, gồm tham số chưa chuẩn hóa. TaskManager validate trước khi submit.
+    #[serde(default)]
+    pub recipe: Option<TaskRecipeRequest>,
     /// Danh sách các `ArtifactInput` (như file `.wav` tải lên) được stage và gắn nguyên tử
     /// vào `(session_id, turn_id)` của lượt chạy đầu tiên.
     #[serde(skip)]
@@ -127,6 +130,7 @@ impl CreateTaskRequest {
             schedule_id: None,
             existing_session_id: None,
             related_wiki_links: Vec::new(),
+            recipe: None,
             input_artifacts: Vec::new(),
         }
     }
@@ -155,6 +159,12 @@ impl CreateTaskRequest {
         self.input_artifacts = artifacts;
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskRecipeRequest {
+    pub id: String,
+    pub params: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

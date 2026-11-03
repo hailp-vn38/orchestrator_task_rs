@@ -411,6 +411,7 @@ pub(crate) fn spawn_autoflow_loop(
                     schedule_id: None,
                     existing_session_id: None,
                     related_wiki_links: Vec::new(),
+                    recipe: None,
                     input_artifacts: Vec::new(),
                 };
 

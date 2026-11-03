@@ -44,4 +44,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", 
 
 [patch.crates-io]
 llm-wiki-rs = { path = "../llm-wiki-rs" }
-orchestrator-agent = { path = "../orchestrator_agent_rs" }
+orchestrator-agent = { path = "../orchestrator_agent_rs-task-recipes-02" }

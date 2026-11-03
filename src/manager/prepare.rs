@@ -42,6 +42,7 @@ impl TaskManager {
             flows: BTreeMap::new(),
             wiki_engine: None,
             autoflow: None,
+            recipes: BTreeMap::new(),
         })
     }
 }
@@ -129,6 +130,7 @@ impl TaskManagerInit {
             core: self.core,
             bg_tasks: Mutex::new(bg_tasks),
             owner_lock: Mutex::new(self.owner_lock.take()),
+            recipes: self.recipes,
         }))
     }
 }
