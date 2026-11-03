@@ -67,8 +67,9 @@ pub use prompts::{
     WIKI_ROOT_PROMPT,
 };
 pub use recipe::{
-    validate_recipe_params, validate_recipe_schema, RecipeDecision, RecipeMetadata, RecipeProgress,
-    RecipeProviderRuntime, RecipeStepKind, RecipeStepOutline, RecipeValidationError, TaskRecipe,
+    validate_recipe_params, validate_recipe_registry, validate_recipe_schema, RecipeDecision,
+    RecipeMetadata, RecipeProgress, RecipeProviderRuntime, RecipeStepKind, RecipeStepOutline,
+    RecipeValidationError, TaskRecipe,
 };
 pub use runtime::WikiAutoFlowBinding;
 pub use tools::{
