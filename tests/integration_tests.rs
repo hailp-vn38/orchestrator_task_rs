@@ -46,3 +46,5 @@ mod scope_and_watcher;
 mod sources_guardrails;
 #[path = "integration/task_lifecycle.rs"]
 mod task_lifecycle;
+#[path = "integration/task_recipes.rs"]
+mod task_recipes;

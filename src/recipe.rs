@@ -153,6 +153,22 @@ impl RecipeProviderRuntime {
         let _ = id;
         Ok(recipe)
     }
+
+    fn request_params(request: &ModelRequest) -> Option<Value> {
+        request
+            .messages
+            .iter()
+            .filter(|message| message.role == ModelRole::User)
+            .find_map(|message| {
+                serde_json::from_str::<Value>(&message.text)
+                    .ok()
+                    .or_else(|| {
+                        let original = message.text.split_once("<original_request>")?.1;
+                        let original = original.split_once("</original_request>")?.0.trim();
+                        serde_json::from_str::<Value>(original).ok()
+                    })
+            })
+    }
 }
 
 /// Validate the references declared by recipe outlines against the host's real catalogs.
@@ -221,12 +237,7 @@ impl ProviderRuntime for RecipeProviderRuntime {
             return Err(GatewayError::Cancelled);
         }
         let recipe = self.resolve_model_id(&request.model_id)?;
-        let params = request
-            .messages
-            .iter()
-            .find(|m| m.role == ModelRole::User)
-            .and_then(|m| serde_json::from_str::<Value>(&m.text).ok())
-            .ok_or(GatewayError::InvalidRequest)?;
+        let params = Self::request_params(request).ok_or(GatewayError::InvalidRequest)?;
         let decision = recipe.next(&params, &request.messages);
         let (text, tool_calls) = match decision {
             RecipeDecision::ToolCalls(calls) => (String::new(), calls),
