@@ -122,6 +122,334 @@ impl TaskRecipe for RetryRecipe {
     }
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecipeTopicOutput {
+    domain: String,
+    topic: String,
+}
+
+struct TypedAgentStepRecipe;
+
+impl TypedAgentStepRecipe {
+    const AGENT: &'static str = "recipe_worker";
+    const COMPLETE_TOOL: &'static str = "recipe_topic_selection_complete";
+
+    fn completion_result<'a>(
+        transcript: &'a [ModelMessage],
+    ) -> Vec<(&'a ModelToolCall, &'a ModelMessage)> {
+        transcript
+            .iter()
+            .flat_map(|message| message.tool_calls.iter())
+            .filter(|call| call.name == "subagent" && call.arguments["agent"] == Self::AGENT)
+            .filter_map(|call| {
+                transcript
+                    .iter()
+                    .find(|result| {
+                        result.role == ModelRole::Tool
+                            && result.tool_call_id.as_deref() == Some(&call.id)
+                    })
+                    .map(|result| (call, result))
+            })
+            .collect()
+    }
+
+    fn output(result: &ModelMessage) -> Result<RecipeTopicOutput, String> {
+        let text = result.text.trim();
+        let start = text
+            .find('>')
+            .ok_or_else(|| "missing completion envelope".to_owned())?
+            + 1;
+        let end = text
+            .rfind("</subagent>")
+            .ok_or_else(|| "missing completion envelope".to_owned())?;
+        let output: RecipeTopicOutput = serde_json::from_str(text[start..end].trim())
+            .map_err(|error| format!("typed completion JSON invalid: {error}"))?;
+        if output.domain.trim().is_empty()
+            || output.topic.is_empty()
+            || !output
+                .topic
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || output.topic.starts_with('-')
+            || output.topic.ends_with('-')
+        {
+            return Err("domain or topic failed typed semantic validation".into());
+        }
+        Ok(output)
+    }
+}
+
+impl TaskRecipe for TypedAgentStepRecipe {
+    fn metadata(&self) -> RecipeMetadata {
+        RecipeMetadata {
+            id: "typed_agent_step".into(),
+            version: 1,
+            title: "Typed agent step".into(),
+            description: "Selects a typed topic through a delegated sub-agent.".into(),
+            params_schema: json!({"type":"object", "properties":{}}),
+            outline: vec![RecipeStepOutline {
+                title: "Select topic".into(),
+                kind: RecipeStepKind::Agent,
+                repeat: false,
+                host_tools: vec![],
+                sub_agents: vec![Self::AGENT.into()],
+            }],
+            max_steps: 5,
+        }
+    }
+
+    fn validate_params(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RecipeValidationError> {
+        Ok(params.clone())
+    }
+
+    fn next(&self, _params: &serde_json::Value, transcript: &[ModelMessage]) -> RecipeDecision {
+        let results = Self::completion_result(transcript);
+        if let Some((_, result)) = results.last() {
+            if let Ok(_typed_output) = Self::output(result) {
+                return RecipeDecision::Complete("typed output accepted".into());
+            }
+            if results.len() >= 2 {
+                return RecipeDecision::Failed {
+                    stop_reason: "RECIPE_STEP_FAILED: INVALID_AGENT_STEP_OUTPUT".into(),
+                    failed_step: 0,
+                };
+            }
+            let session_id = result
+                .text
+                .split_once("sessionID=\"")
+                .and_then(|(_, rest)| rest.split_once('\"').map(|(sid, _)| sid))
+                .unwrap_or_default();
+            return RecipeDecision::ToolCalls(vec![ModelToolCall {
+                id: "typed-step-resume".into(),
+                name: "subagent".into(),
+                arguments: json!({
+                    "agent": Self::AGENT,
+                    "description": "Correct the topic selection",
+                    "session_id": session_id,
+                    "prompt": "Typed diagnosis: INVALID_AGENT_STEP_OUTPUT. Return one exact JSON object with string fields domain and topic, where topic is a lowercase kebab-case slug. Call the completion tool, then return its canonical JSON output with no prose."
+                }),
+            }]);
+        }
+        RecipeDecision::ToolCalls(vec![ModelToolCall {
+            id: "typed-step-start".into(),
+            name: "subagent".into(),
+            arguments: json!({
+                "agent": Self::AGENT,
+                "description": "Select a Wiki topic",
+                "prompt": "Use recipe_topic_selection_complete with domain and topic, then return its canonical JSON output as the entire final response."
+            }),
+        }])
+    }
+
+    fn progress(
+        &self,
+        _params: &serde_json::Value,
+        _transcript: &[ModelMessage],
+    ) -> RecipeProgress {
+        RecipeProgress {
+            current_step: Some(0),
+            completed_steps: vec![],
+            completed_items: None,
+            total_items: None,
+            summary: None,
+            stop_reason: None,
+            failed_step: None,
+        }
+    }
+}
+
+struct RecipeTopicCompletionTool;
+
+#[async_trait]
+impl HostTool for RecipeTopicCompletionTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: TypedAgentStepRecipe::COMPLETE_TOOL.into(),
+            description: "Complete a typed topic selection.".into(),
+            input_schema: json!({
+                "type":"object",
+                "properties": {
+                    "domain":{"type":"string", "minLength":1},
+                    "topic":{"type":"string", "pattern":"^[a-z0-9]+(?:-[a-z0-9]+)*$"}
+                },
+                "required":["domain","topic"],
+                "additionalProperties":false
+            }),
+            effect: ToolEffect::ReadOnly,
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        args: serde_json::Value,
+    ) -> Result<ToolOutcome, ToolError> {
+        let output: RecipeTopicOutput =
+            serde_json::from_value(args).map_err(|error| ToolError {
+                code: "INVALID_COMPLETION_OUTPUT".into(),
+                message: error.to_string(),
+            })?;
+        Ok(ToolOutcome {
+            call_id: context.scope().tool_call_id.clone(),
+            content: serde_json::to_string(&output).unwrap(),
+            metadata: json!({"schema":"topic-selection:v1"}),
+        })
+    }
+}
+
+#[tokio::test]
+async fn task_manager_agent_step_accepts_corrects_once_and_stops_after_two_invalid_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let prompt = dir.path().join("agent.md");
+    std::fs::write(&prompt, "test recipe").unwrap();
+    let task_init = TaskManager::prepare(TaskConfig::new(dir.path().join("task_store")))
+        .await
+        .unwrap()
+        .register_recipe(Arc::new(TypedAgentStepRecipe))
+        .unwrap();
+    let root = AgentDefinition::new("recipe_typed_agent_step", "recipe", "typed_agent_step@1")
+        .with_mode(AgentMode::Primary)
+        .with_prompt_path(&prompt)
+        .with_allowed_tools(["subagent"])
+        .with_allowed_subagents([TypedAgentStepRecipe::AGENT])
+        .with_steps(5);
+    let worker = AgentDefinition::new(TypedAgentStepRecipe::AGENT, "test", "gpt-test")
+        .with_mode(AgentMode::Subagent)
+        .with_prompt_path(&prompt)
+        .with_allowed_tools([TypedAgentStepRecipe::COMPLETE_TOOL])
+        .with_steps(4);
+    let gateway = ScriptedGateway::new();
+    let orchestrator = Arc::new(
+        Orchestrator::builder(OrchestratorConfig::new(
+            orchestrator_agent_rs::LlmConfig { providers: vec![] },
+            vec![root, worker],
+            dir.path().join("orchestrator_store"),
+        ))
+        .with_provider_runtime(Arc::new(RecipeAndScriptedRuntime {
+            recipes: task_init.recipe_provider_runtime().unwrap(),
+            allow_agent_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            summaries: None,
+            scripted_agents: Some(gateway.clone()),
+        }))
+        .register_tool(Arc::new(RecipeTopicCompletionTool))
+        .build()
+        .await
+        .unwrap(),
+    );
+    let manager = task_init
+        .register_flow("default", orchestrator.clone())
+        .start()
+        .await
+        .unwrap();
+
+    gateway.push_tool_calls(
+        "",
+        vec![(
+            "complete-valid",
+            TypedAgentStepRecipe::COMPLETE_TOOL,
+            json!({"domain":"technology", "topic":"machine-learning"}),
+        )],
+    );
+    gateway.push_text(r#"{"domain":"technology","topic":"machine-learning"}"#);
+    let completed = manager
+        .create_task(CreateTaskRequest {
+            recipe: Some(TaskRecipeRequest {
+                id: "typed_agent_step".into(),
+                params: json!({}),
+            }),
+            ..CreateTaskRequest::new("", "")
+        })
+        .await
+        .unwrap();
+    wait_for_task_status(&manager, &completed.id, TaskStatus::Completed).await;
+    assert_eq!(gateway.requests().len(), 2);
+
+    gateway.push_tool_calls(
+        "",
+        vec![(
+            "complete-invalid",
+            TypedAgentStepRecipe::COMPLETE_TOOL,
+            json!({"domain":"technology", "topic":"Bad Topic"}),
+        )],
+    );
+    gateway.push_text(r#"{"domain":"technology","topic":"Bad Topic"}"#);
+    gateway.push_tool_calls(
+        "",
+        vec![(
+            "complete-corrected",
+            TypedAgentStepRecipe::COMPLETE_TOOL,
+            json!({"domain":"technology", "topic":"machine-learning"}),
+        )],
+    );
+    gateway.push_text(r#"{"domain":"technology","topic":"machine-learning"}"#);
+    let corrected = manager
+        .create_task(CreateTaskRequest {
+            recipe: Some(TaskRecipeRequest {
+                id: "typed_agent_step".into(),
+                params: json!({}),
+            }),
+            ..CreateTaskRequest::new("", "")
+        })
+        .await
+        .unwrap();
+    wait_for_task_status(&manager, &corrected.id, TaskStatus::Completed).await;
+    let requests = gateway.requests();
+    assert_eq!(requests.len(), 6);
+    assert!(requests[4]
+        .messages
+        .last()
+        .unwrap()
+        .text
+        .contains("INVALID_AGENT_STEP_OUTPUT"));
+
+    gateway.push_tool_calls(
+        "",
+        vec![(
+            "complete-invalid-again",
+            TypedAgentStepRecipe::COMPLETE_TOOL,
+            json!({"domain":"technology", "topic":"Bad Topic"}),
+        )],
+    );
+    gateway.push_text(r#"{"domain":"technology","topic":"Bad Topic"}"#);
+    gateway.push_tool_calls(
+        "",
+        vec![(
+            "complete-invalid-resume",
+            TypedAgentStepRecipe::COMPLETE_TOOL,
+            json!({"domain":"technology", "topic":"Bad Topic"}),
+        )],
+    );
+    gateway.push_text(r#"{"domain":"technology","topic":"Bad Topic"}"#);
+    let failed = manager
+        .create_task(CreateTaskRequest {
+            recipe: Some(TaskRecipeRequest {
+                id: "typed_agent_step".into(),
+                params: json!({}),
+            }),
+            ..CreateTaskRequest::new("", "")
+        })
+        .await
+        .unwrap();
+    wait_for_task_status(&manager, &failed.id, TaskStatus::Failed).await;
+    let failed_detail = manager.get_task_detail(&failed.id).await.unwrap();
+    assert_eq!(
+        failed_detail.task.error_code.as_deref(),
+        Some("RECIPE_STEP_FAILED")
+    );
+    assert_eq!(
+        gateway.requests().len(),
+        10,
+        "second invalid output must not trigger another agent loop"
+    );
+
+    manager.shutdown().await.unwrap();
+    orchestrator.shutdown().await.unwrap();
+}
+
 const COMPACTION_VIDEO_IDS: [&str; 4] = ["video-a", "video-b", "video-c", "video-d"];
 
 #[derive(Default)]
@@ -621,6 +949,7 @@ struct RecipeAndScriptedRuntime {
     recipes: Arc<orchestrator_flow_rs::RecipeProviderRuntime>,
     allow_agent_response: Arc<std::sync::atomic::AtomicBool>,
     summaries: Option<Arc<ScriptedGateway>>,
+    scripted_agents: Option<Arc<ScriptedGateway>>,
 }
 
 #[async_trait]
@@ -651,6 +980,14 @@ impl ProviderRuntime for RecipeAndScriptedRuntime {
             .await
         } else if request.provider_id == "recipe" {
             self.recipes.complete(request, cancel, sink).await
+        } else if let Some(scripted) = &self.scripted_agents {
+            orchestrator_agent_rs::test_support::LlmGateway::complete(
+                scripted.as_ref(),
+                request,
+                cancel,
+                sink,
+            )
+            .await
         } else if self.allow_agent_response.load(Ordering::SeqCst) {
             Ok(ModelResponse {
                 text: "analysis complete".into(),
@@ -710,6 +1047,7 @@ async fn recipe_playlist_compacts_transcripts_and_uses_the_ledger_for_the_next_b
                 recipes: task_init.recipe_provider_runtime().unwrap(),
                 allow_agent_response: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 summaries: Some(scripted.clone()),
+                scripted_agents: None,
             }))
             .register_tool(Arc::new(CompactionPlaylistTool {
                 name: "collection_status",
@@ -805,6 +1143,7 @@ async fn recipe_waits_on_agent_rate_limit_and_resumes_without_repeating_complete
         recipes: task_init.recipe_provider_runtime().unwrap(),
         allow_agent_response: allow_agent_response.clone(),
         summaries: None,
+        scripted_agents: None,
     }));
     builder = builder.register_tool(Arc::new(RecipeReadTool(read_count.clone())));
     let orchestrator = Arc::new(builder.build().await.unwrap());
