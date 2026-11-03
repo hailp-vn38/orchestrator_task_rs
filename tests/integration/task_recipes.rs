@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -129,6 +131,7 @@ struct CompactionLedger {
 struct CompactionPlaylistTool {
     name: &'static str,
     ledger: Arc<CompactionLedger>,
+    fake_ytdlp: PathBuf,
 }
 
 #[async_trait]
@@ -188,10 +191,24 @@ impl HostTool for CompactionPlaylistTool {
                     .lock()
                     .unwrap()
                     .insert(video_id.to_owned());
-                format!(
-                    "TRANSCRIPT {video_id}\n{}",
-                    "subtitle line with useful words ".repeat(900)
-                )
+                let output = tokio::process::Command::new(&self.fake_ytdlp)
+                    .arg(video_id)
+                    .output()
+                    .await
+                    .map_err(|error| ToolError {
+                        code: "FAKE_YTDLP_FAILED".into(),
+                        message: error.to_string(),
+                    })?;
+                if !output.status.success() {
+                    return Err(ToolError {
+                        code: "FAKE_YTDLP_FAILED".into(),
+                        message: format!("fake yt-dlp exited with {}", output.status),
+                    });
+                }
+                String::from_utf8(output.stdout).map_err(|error| ToolError {
+                    code: "FAKE_YTDLP_FAILED".into(),
+                    message: error.to_string(),
+                })?
             }
             _ => {
                 return Err(ToolError {
@@ -644,6 +661,13 @@ async fn recipe_playlist_compacts_transcripts_and_uses_the_ledger_for_the_next_b
     let dir = tempfile::tempdir().unwrap();
     let prompt_path = dir.path().join("agent.md");
     std::fs::write(&prompt_path, "Test recipe root").unwrap();
+    let fake_ytdlp = dir.path().join("fake-yt-dlp");
+    std::fs::write(
+        &fake_ytdlp,
+        "#!/bin/sh\nprintf 'TRANSCRIPT %s\\n' \"$1\"\ni=0\nwhile [ $i -lt 900 ]; do printf 'subtitle line with useful words %s\\n' \"$1\"; i=$((i + 1)); done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ytdlp, std::fs::Permissions::from_mode(0o755)).unwrap();
     let ledger = Arc::new(CompactionLedger::default());
     let task_init = TaskManager::prepare(TaskConfig::new(dir.path().join("task_store")))
         .await
@@ -680,10 +704,12 @@ async fn recipe_playlist_compacts_transcripts_and_uses_the_ledger_for_the_next_b
             .register_tool(Arc::new(CompactionPlaylistTool {
                 name: "collection_status",
                 ledger: ledger.clone(),
+                fake_ytdlp: fake_ytdlp.clone(),
             }))
             .register_tool(Arc::new(CompactionPlaylistTool {
                 name: "yt_fetch_transcript",
                 ledger: ledger.clone(),
+                fake_ytdlp: fake_ytdlp.clone(),
             }))
             .build()
             .await
