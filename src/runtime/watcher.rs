@@ -46,7 +46,10 @@ async fn run_task_watcher(core: Arc<SharedTaskCore>, initial_task: TaskView) {
         }
 
         // Mở subscription TRƯỚC khi kiểm tra trạng thái để không bỏ lỡ terminal event
-        let mut sub_opt = orch.subscribe(&caller, &initial_task.session_id).await.ok();
+        let mut sub_opt = orch
+            .subscribe(&caller, &initial_task.active_session_id)
+            .await
+            .ok();
 
         // Kiểm tra xem turn đã xong chưa (hoặc có followup tiếp theo cần đẩy vào không)
         let Ok(Some(current_task)) = core.store.get_task_unscoped(&initial_task.id).await else {
@@ -291,11 +294,11 @@ async fn handle_execution_event(
             let _ = core
                 .project_task_waiting(task, reason, next_at, err_code, None)
                 .await;
-            ev.session_id == task.session_id
+            ev.session_id == task.active_session_id
         }
         "run.completed" | "run.failed" | "run.cancelled" | "run.interrupted" => {
             // Chỉ coi là terminal của Root Task khi event thuộc chính Root session của Task
-            ev.session_id == task.session_id
+            ev.session_id == task.active_session_id
         }
         _ => false,
     }

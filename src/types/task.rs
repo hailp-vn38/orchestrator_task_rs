@@ -180,6 +180,12 @@ pub struct TaskView {
     pub source: TaskSource,
     pub schedule_id: Option<String>,
     pub session_id: String,
+    /// Session currently owning `latest_turn_id`; recipe follow-ups use a separate `daily_root` session.
+    #[serde(default)]
+    pub active_session_id: String,
+    /// Reused `daily_root` session for all recipe follow-ups, when one has been opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup_session_id: Option<String>,
     pub latest_turn_id: Option<String>,
     pub status: TaskStatus,
     pub active_subagent: Option<String>,
@@ -251,6 +257,9 @@ pub struct TaskDetailView {
     pub execution_summary: Option<TaskExecutionSummary>,
     pub root_agent: Option<TaskAgentSessionView>,
     pub subagents: Vec<TaskAgentSessionView>,
+    /// Independent root sessions opened for Task follow-ups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followup_agents: Vec<TaskAgentSessionView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<TaskRecipeView>,
     #[serde(skip)]
@@ -277,10 +286,17 @@ impl TaskDetailView {
                 let mut summary = TaskExecutionSummary::from_family_snapshot(snap);
                 summary.apply_artifacts(&artifacts);
                 let root = TaskAgentSessionView::from_session_snapshot(&snap.root);
+                let recipe_run = root.agent_id.starts_with("recipe_");
                 let children = snap
                     .children
                     .iter()
-                    .map(TaskAgentSessionView::from_session_snapshot)
+                    .map(|child| {
+                        let mut view = TaskAgentSessionView::from_session_snapshot(child);
+                        if recipe_run {
+                            view.run_kind = crate::types::execution::AgentRunKind::Recipe;
+                        }
+                        view
+                    })
                     .collect();
                 (Some(summary), Some(root), children)
             }
@@ -295,6 +311,7 @@ impl TaskDetailView {
             execution_summary,
             root_agent,
             subagents,
+            followup_agents: Vec::new(),
             recipe: None,
             family_snapshot,
         }
@@ -302,11 +319,12 @@ impl TaskDetailView {
 
     /// Trả về danh sách mọi phiên Agent trong Task (Root Agent đứng đầu, tiếp theo là các Subagent).
     pub fn all_agents(&self) -> Vec<&TaskAgentSessionView> {
-        let mut out = Vec::with_capacity(1 + self.subagents.len());
+        let mut out = Vec::with_capacity(1 + self.subagents.len() + self.followup_agents.len());
         if let Some(ref root) = self.root_agent {
             out.push(root);
         }
         out.extend(self.subagents.iter());
+        out.extend(self.followup_agents.iter());
         out
     }
 

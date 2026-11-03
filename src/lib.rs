@@ -102,8 +102,8 @@ pub use tools::{
     MAX_REFERENCE_IMAGE_BYTES, VIDEO_CONCAT_TOOL,
 };
 pub use types::{
-    AgentCatalogEntry, CreateScheduleRequest, CreateTaskRequest, FollowupStatus, FollowupView,
-    Priority, ResolveStuckTool, ScheduleActionKind, ScheduleFilter, ScheduleKind,
+    AgentCatalogEntry, AgentRunKind, CreateScheduleRequest, CreateTaskRequest, FollowupStatus,
+    FollowupView, Priority, ResolveStuckTool, ScheduleActionKind, ScheduleFilter, ScheduleKind,
     ScheduleSessionMode, ScheduleStatus, ScheduleView, StuckToolDecision, TaskAgentMessageView,
     TaskAgentRunView, TaskAgentSessionView, TaskArtifactCatalogEntry, TaskArtifactCatalogPage,
     TaskArtifactCatalogSummary, TaskArtifactDownload, TaskArtifactFilter, TaskArtifactKind,

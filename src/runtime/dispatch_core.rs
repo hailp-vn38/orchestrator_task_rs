@@ -163,6 +163,8 @@ impl SharedTaskCore {
         task_id: &str,
         prompt: String,
         source: TaskSource,
+        followup_agent: Option<&str>,
+        first_context: Option<String>,
     ) -> TaskResult<FollowupView> {
         self.ensure_open()?;
         let clean_prompt = prompt.trim();
@@ -177,9 +179,29 @@ impl SharedTaskCore {
         let orch = self.flows()?.get_flow(&task.flow_id)?.clone();
         let caller = task_scope.to_caller_context();
 
+        let (target_session_id, is_new_followup_session) = if let Some(agent_id) = followup_agent {
+            if let Some(session_id) = task.followup_session_id.clone() {
+                (session_id, false)
+            } else {
+                let created = orch.create_session(&caller, agent_id).await?;
+                let persisted = self
+                    .store
+                    .set_followup_session_id(&task.id, &created)
+                    .await?;
+                (persisted.clone(), persisted == created)
+            }
+        } else {
+            (task.active_session_id.clone(), false)
+        };
+        let stored_prompt = if is_new_followup_session {
+            first_context.as_deref().unwrap_or(clean_prompt).to_string()
+        } else {
+            clean_prompt.to_string()
+        };
+
         let followup = self
             .store
-            .enqueue_followup(&task.id, clean_prompt, source)
+            .enqueue_followup(&task.id, &stored_prompt, source)
             .await?;
 
         if task.status != TaskStatus::Running && task.status != TaskStatus::Waiting {
@@ -187,12 +209,7 @@ impl SharedTaskCore {
                 budget: Some(budget_for_source(source)),
             };
             if let Ok(accepted) = orch
-                .submit_with_options(
-                    &caller,
-                    &task.session_id,
-                    clean_prompt.to_string(),
-                    submit_opts,
-                )
+                .submit_with_options(&caller, &target_session_id, stored_prompt, submit_opts)
                 .await
             {
                 self.store
@@ -202,6 +219,7 @@ impl SharedTaskCore {
                     .store
                     .mark_task_turn_running(
                         &task.id,
+                        &target_session_id,
                         &accepted.turn_id,
                         "Running follow-up turn...",
                     )
@@ -242,7 +260,7 @@ impl SharedTaskCore {
         if !task.status.is_terminal() {
             let orch = self.flows()?.get_flow(&task.flow_id)?.clone();
             let caller = task_scope.to_caller_context();
-            let _ = orch.cancel(&caller, &task.session_id).await;
+            let _ = orch.cancel(&caller, &task.active_session_id).await;
             if let Some(updated) = self
                 .store
                 .finish_task(
@@ -298,6 +316,12 @@ impl SharedTaskCore {
                 let _ = orch.delete_session(&caller, &task.session_id).await;
             }
         }
+        if let Some(session_id) = task.followup_session_id.as_deref() {
+            if let Ok(orch) = self.flows()?.get_flow(&task.flow_id) {
+                let caller = task_scope.to_caller_context();
+                let _ = orch.delete_session(&caller, session_id).await;
+            }
+        }
 
         self.event_bus.emit(TaskEvent::TaskDeleted {
             task_id: task.id,
@@ -322,7 +346,7 @@ impl SharedTaskCore {
         let orch = self.flows()?.get_flow(&task.flow_id)?.clone();
         let caller = task_scope.to_caller_context();
 
-        match orch.resume_waiting(&caller, &task.session_id).await {
+        match orch.resume_waiting(&caller, &task.active_session_id).await {
             Ok(()) => {}
             Err(err) if err.code() == OrchErrorCode::InvalidInput => {
                 return Err(TaskError::invalid_state(err.message()));
@@ -355,7 +379,7 @@ impl SharedTaskCore {
         let session_id = request
             .session_id
             .as_deref()
-            .unwrap_or(task.session_id.as_str());
+            .unwrap_or(task.active_session_id.as_str());
         let decision = match request.decision {
             StuckToolDecision::NoEffect { evidence } => {
                 VerifiedToolResolution::ConfirmedNoEffect { evidence }
@@ -442,10 +466,15 @@ impl SharedTaskCore {
         let caller = scope.to_caller_context();
 
         if let Some(ref turn_id) = task.latest_turn_id {
-            let res = orch.result(&caller, &task.session_id, turn_id).await?;
+            let res = orch
+                .result(&caller, &task.active_session_id, turn_id)
+                .await?;
             if res.status == RunStatus::Running {
                 // Root vẫn `running` khi con cháu chờ: Task phải giữ lý do, lịch và nút "Chạy tiếp".
-                if let Some(child) = orch.waiting_descendant(&caller, &task.session_id).await? {
+                if let Some(child) = orch
+                    .waiting_descendant(&caller, &task.active_session_id)
+                    .await?
+                {
                     let unchanged = task.status == TaskStatus::Waiting
                         && task.wait_reason == child.retry_reason
                         && task.next_attempt_at == child.next_attempt_at;
@@ -516,7 +545,9 @@ impl SharedTaskCore {
                     if let Ok(accepted) = orch
                         .submit_with_options(
                             &caller,
-                            &task.session_id,
+                            task.followup_session_id
+                                .as_deref()
+                                .unwrap_or(&task.active_session_id),
                             next_fu.prompt.clone(),
                             submit_opts,
                         )
@@ -528,6 +559,9 @@ impl SharedTaskCore {
                         self.store
                             .mark_task_turn_running(
                                 &task.id,
+                                task.followup_session_id
+                                    .as_deref()
+                                    .unwrap_or(&task.active_session_id),
                                 &accepted.turn_id,
                                 "Running queued follow-up...",
                             )
@@ -579,7 +613,9 @@ impl SharedTaskCore {
             if let Ok(accepted) = orch
                 .submit_with_options(
                     &caller,
-                    &task.session_id,
+                    task.followup_session_id
+                        .as_deref()
+                        .unwrap_or(&task.active_session_id),
                     next_fu.prompt.clone(),
                     submit_opts,
                 )
@@ -589,7 +625,14 @@ impl SharedTaskCore {
                     .mark_followup_submitted(&next_fu.id, &accepted.turn_id)
                     .await?;
                 self.store
-                    .mark_task_turn_running(&task.id, &accepted.turn_id, "Starting queued turn...")
+                    .mark_task_turn_running(
+                        &task.id,
+                        task.followup_session_id
+                            .as_deref()
+                            .unwrap_or(&task.active_session_id),
+                        &accepted.turn_id,
+                        "Starting queued turn...",
+                    )
                     .await?;
                 return Ok(false);
             }
