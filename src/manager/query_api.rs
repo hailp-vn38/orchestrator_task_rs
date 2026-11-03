@@ -15,6 +15,14 @@ use crate::types::{
 };
 
 impl TaskManager {
+    /// Metadata and step outline for recipes registered by the host at startup.
+    pub fn available_recipes(&self) -> Vec<crate::recipe::RecipeMetadata> {
+        self.recipes
+            .values()
+            .map(|recipe| recipe.metadata())
+            .collect()
+    }
+
     /// Đường dẫn thư mục chứa `tasks.db` và `tasks.owner.lock`.
     pub fn store_dir(&self) -> &Path {
         &self.core.config.store_dir

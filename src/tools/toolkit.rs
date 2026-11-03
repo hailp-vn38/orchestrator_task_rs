@@ -182,6 +182,24 @@ impl WorkspaceToolKit {
         self
     }
 
+    /// Select a custom `yt-dlp` executable and timeout for hosts and deterministic tests.
+    pub fn with_ytdlp(mut self, bin: impl Into<PathBuf>, timeout: std::time::Duration) -> Self {
+        let work_dir = self.yt_env.work_dir.clone();
+        let langs = self.yt_env.langs.clone();
+        let limit = self.yt_env.limit;
+        self.yt_env = Arc::new(
+            YoutubeCollectorEnv::new(
+                Arc::clone(&self.engine),
+                Arc::clone(&self.autoflow_notify),
+                work_dir,
+            )
+            .with_langs(langs)
+            .with_limit(limit)
+            .with_ytdlp(bin, timeout),
+        );
+        self
+    }
+
     /// Tùy chỉnh giới hạn số ký tự tối đa trích xuất từ mỗi file PDF (`max_chars`).
     pub fn with_pdf_max_chars(mut self, max_chars: Option<usize>) -> Self {
         let work_dir = self.pdf_state.work_dir.clone();

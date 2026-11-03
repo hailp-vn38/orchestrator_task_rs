@@ -232,6 +232,7 @@ async fn fire_single_schedule(core: &Arc<SharedTaskCore>, sched: ScheduleView, f
                 schedule_id: Some(sched.id.clone()),
                 existing_session_id,
                 related_wiki_links: sched.related_wiki_links.clone(),
+                recipe: None,
                 input_artifacts: Vec::new(),
             };
 
