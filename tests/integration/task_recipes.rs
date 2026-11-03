@@ -113,6 +113,8 @@ impl TaskRecipe for RetryRecipe {
         RecipeProgress {
             current_step: None,
             completed_steps: vec![],
+            completed_items: None,
+            total_items: None,
             summary: None,
             stop_reason: None,
             failed_step: None,
@@ -316,6 +318,8 @@ impl TaskRecipe for CompactionPlaylistRecipe {
             } else {
                 vec![]
             },
+            completed_items: None,
+            total_items: None,
             summary: remaining.map(|remaining| {
                 format!(
                     "{} of {} transcripts remain",
@@ -385,6 +389,8 @@ impl TaskRecipe for BatchRecipe {
         RecipeProgress {
             current_step: Some(0),
             completed_steps: vec![],
+            completed_items: None,
+            total_items: None,
             summary: None,
             stop_reason: None,
             failed_step: None,
@@ -443,6 +449,8 @@ impl TaskRecipe for BudgetRecipe {
         RecipeProgress {
             current_step: Some(0),
             completed_steps: vec![],
+            completed_items: None,
+            total_items: None,
             summary: Some("one partial result".into()),
             stop_reason: None,
             failed_step: None,
@@ -539,6 +547,8 @@ impl TaskRecipe for DurableRecipe {
         RecipeProgress {
             current_step: Some(0),
             completed_steps: vec![],
+            completed_items: None,
+            total_items: None,
             summary: None,
             stop_reason: None,
             failed_step: None,

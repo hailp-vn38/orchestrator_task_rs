@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use llm_wiki::WikiEngine;
+use orchestrator_agent_rs::{ModelMessage, ModelRole, ModelToolCall, PageRequest};
+use serde_json::Value;
 
 use crate::error::TaskResult;
 use crate::manager::TaskManager;
@@ -96,7 +98,9 @@ impl TaskManager {
     /// Lấy thông tin một Task theo `task_id` trong `TaskScope` chỉ định.
     pub async fn get_task_scoped(&self, scope: &TaskScope, task_id: &str) -> TaskResult<TaskView> {
         self.core.ensure_open()?;
-        self.core.store.get_task(scope, task_id).await
+        let mut task = self.core.store.get_task(scope, task_id).await?;
+        task.recipe = self.task_recipe_view(scope, &task).await;
+        Ok(task)
     }
 
     /// Lấy thông tin một Task theo `task_id` bất kể `TaskScope` (cho Admin UI).
@@ -118,7 +122,11 @@ impl TaskManager {
         scope: &TaskScope,
         task_id: &str,
     ) -> TaskResult<TaskDetailView> {
-        self.core.get_task_detail_internal(scope, task_id).await
+        let mut detail = self.core.get_task_detail_internal(scope, task_id).await?;
+        let recipe = self.task_recipe_view(scope, &detail.task).await;
+        detail.task.recipe = recipe.clone();
+        detail.recipe = recipe;
+        Ok(detail)
     }
 
     /// Lấy chi tiết đầy đủ của một Task bất kể `TaskScope` (cho Admin UI).
@@ -179,19 +187,30 @@ impl TaskManager {
         filter: &TaskFilter,
     ) -> TaskResult<TaskPage<TaskView>> {
         self.core.ensure_open()?;
-        self.core
+        let mut page = self
+            .core
             .store
             .list_tasks(scope, filter, self.core.config.runtime.page_size)
-            .await
+            .await?;
+        for task in &mut page.items {
+            task.recipe = self.task_recipe_view(scope, task).await;
+        }
+        Ok(page)
     }
 
     /// Liệt kê các Task trên toàn bộ `TaskScope` (cho Admin UI).
     pub async fn list_all_tasks(&self, filter: &TaskFilter) -> TaskResult<TaskPage<TaskView>> {
         self.core.ensure_open()?;
-        self.core
+        let mut page = self
+            .core
             .store
             .list_tasks_all(filter, self.core.config.runtime.page_size)
-            .await
+            .await?;
+        for task in &mut page.items {
+            let scope = TaskScope::new(&task.owner_id, &task.workspace_id);
+            task.recipe = self.task_recipe_view(&scope, task).await;
+        }
+        Ok(page)
     }
 
     /// Liệt kê toàn bộ các Artifact đa định dạng (Report, Image, Audio/TTS, Document, Data)
@@ -308,4 +327,141 @@ impl TaskManager {
         let bytes = dl.read_all_bytes().await?;
         Ok((meta, bytes))
     }
+
+    async fn task_recipe_view(
+        &self,
+        scope: &TaskScope,
+        task: &TaskView,
+    ) -> Option<crate::recipe::TaskRecipeView> {
+        let recipe_id = task.agent_id.strip_prefix("recipe_")?;
+        let recipe = self.recipes.get(recipe_id)?;
+        let params: Value = serde_json::from_str(&task.prompt).ok()?;
+        let messages = self
+            .recipe_transcript(scope, task)
+            .await
+            .unwrap_or_default();
+        let transcript = model_transcript(&messages);
+        let metadata = recipe.metadata();
+        let mut progress = recipe.progress(&params, &transcript);
+
+        match recipe.next(&params, &transcript) {
+            crate::recipe::RecipeDecision::Complete(_) => {
+                progress.current_step = None;
+                progress.completed_steps = (0..metadata.outline.len()).collect();
+                progress.completed_items = progress.total_items;
+                progress.stop_reason = None;
+                progress.failed_step = None;
+            }
+            crate::recipe::RecipeDecision::Failed {
+                stop_reason,
+                failed_step,
+            } => {
+                progress.current_step = None;
+                progress.stop_reason = Some(stop_reason);
+                progress.failed_step = Some(failed_step);
+            }
+            crate::recipe::RecipeDecision::ToolCalls(_) => {}
+        }
+
+        if task.status == crate::types::TaskStatus::Completed {
+            progress.current_step = None;
+            progress.completed_steps = (0..metadata.outline.len()).collect();
+            progress.completed_items = progress.total_items;
+            progress.stop_reason = None;
+            progress.failed_step = None;
+        } else if matches!(
+            task.status,
+            crate::types::TaskStatus::Stopped
+                | crate::types::TaskStatus::Failed
+                | crate::types::TaskStatus::Cancelled
+                | crate::types::TaskStatus::Interrupted
+        ) && progress.stop_reason.is_none()
+        {
+            progress.stop_reason = task
+                .error_message
+                .clone()
+                .or_else(|| task.error_code.clone())
+                .or_else(|| task.progress_summary.clone())
+                .or_else(|| Some(format!("Task {}", task.status.as_str())));
+            progress.failed_step = progress.current_step;
+            progress.current_step = None;
+        }
+
+        Some(crate::recipe::TaskRecipeView {
+            id: metadata.id,
+            version: metadata.version,
+            title: metadata.title,
+            params,
+            outline: metadata.outline,
+            progress,
+        })
+    }
+
+    async fn recipe_transcript(
+        &self,
+        scope: &TaskScope,
+        task: &TaskView,
+    ) -> TaskResult<Vec<TaskAgentMessageView>> {
+        let orch = self.core.flows()?.get_flow(&task.flow_id)?;
+        let caller = scope.to_caller_context();
+        let page_size = self.core.config.runtime.page_size;
+        let mut page_request = PageRequest::first(page_size);
+        let mut transcript = Vec::new();
+        loop {
+            let page = orch
+                .history(&caller, &task.session_id, page_request)
+                .await?;
+            transcript.extend(
+                page.items
+                    .iter()
+                    .map(TaskAgentMessageView::from_message_view),
+            );
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            page_request = PageRequest::after(cursor, page_size);
+        }
+        Ok(transcript)
+    }
+}
+
+fn model_transcript(messages: &[TaskAgentMessageView]) -> Vec<ModelMessage> {
+    let tool_names: std::collections::HashMap<&str, &str> = messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .map(|call| (call.call_id.as_str(), call.name.as_str()))
+        .collect();
+
+    messages
+        .iter()
+        .filter_map(|message| {
+            let role = match message.role.as_str() {
+                "user" => ModelRole::User,
+                "assistant" => ModelRole::Assistant,
+                "tool" => ModelRole::Tool,
+                _ => return None,
+            };
+            let tool_calls = message
+                .tool_calls
+                .iter()
+                .map(|call| ModelToolCall {
+                    id: call.call_id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                })
+                .collect();
+            let tool_name = message
+                .tool_call_id
+                .as_deref()
+                .and_then(|id| tool_names.get(id).copied())
+                .map(str::to_owned);
+            Some(ModelMessage {
+                role,
+                text: message.text.clone(),
+                tool_calls,
+                tool_call_id: message.tool_call_id.clone(),
+                tool_name,
+            })
+        })
+        .collect()
 }
