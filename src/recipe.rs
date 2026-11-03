@@ -49,9 +49,24 @@ pub struct RecipeMetadata {
 pub struct RecipeProgress {
     pub current_step: Option<usize>,
     pub completed_steps: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_items: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<usize>,
     pub summary: Option<String>,
     pub stop_reason: Option<String>,
     pub failed_step: Option<usize>,
+}
+
+/// Recipe identity, inputs, outline and transcript-derived progress exposed on Task views.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRecipeView {
+    pub id: String,
+    pub version: u32,
+    pub title: String,
+    pub params: Value,
+    pub outline: Vec<RecipeStepOutline>,
+    pub progress: RecipeProgress,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +515,8 @@ mod tests {
                 } else {
                     vec![]
                 },
+                completed_items: None,
+                total_items: None,
                 summary: None,
                 stop_reason: None,
                 failed_step: None,

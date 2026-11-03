@@ -94,6 +94,7 @@ impl TaskStore {
             next_attempt_at: None,
             error_code: None,
             error_message: None,
+            recipe: None,
             created_at: now,
             started_at,
             updated_at: now,

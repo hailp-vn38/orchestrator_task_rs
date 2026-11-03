@@ -69,7 +69,7 @@ pub use prompts::{
 pub use recipe::{
     validate_recipe_params, validate_recipe_registry, validate_recipe_schema, RecipeDecision,
     RecipeMetadata, RecipeProgress, RecipeProviderRuntime, RecipeStepKind, RecipeStepOutline,
-    RecipeValidationError, TaskRecipe,
+    RecipeValidationError, TaskRecipe, TaskRecipeView,
 };
 pub use runtime::WikiAutoFlowBinding;
 pub use tools::{

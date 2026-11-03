@@ -56,6 +56,7 @@ pub(crate) fn map_task_row(row: &SqliteRow) -> TaskView {
         next_attempt_at: row.get("next_attempt_at"),
         error_code: row.get("error_code"),
         error_message: row.get("error_message"),
+        recipe: None,
         created_at: row.get("created_at"),
         started_at: row.get("started_at"),
         updated_at: row.get("updated_at"),

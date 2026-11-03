@@ -4,6 +4,7 @@ use orchestrator_agent_rs::{ArtifactInput, FamilySnapshot, RunStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::config::TargetAgent;
+use crate::recipe::TaskRecipeView;
 use crate::types::artifact::TaskArtifactView;
 use crate::types::execution::{TaskAgentSessionView, TaskExecutionSummary};
 
@@ -190,6 +191,8 @@ pub struct TaskView {
     pub next_attempt_at: Option<i64>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<TaskRecipeView>,
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub updated_at: i64,
@@ -248,6 +251,8 @@ pub struct TaskDetailView {
     pub execution_summary: Option<TaskExecutionSummary>,
     pub root_agent: Option<TaskAgentSessionView>,
     pub subagents: Vec<TaskAgentSessionView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<TaskRecipeView>,
     #[serde(skip)]
     pub family_snapshot: Option<FamilySnapshot>,
 }
@@ -290,6 +295,7 @@ impl TaskDetailView {
             execution_summary,
             root_agent,
             subagents,
+            recipe: None,
             family_snapshot,
         }
     }
