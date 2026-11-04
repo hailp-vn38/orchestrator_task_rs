@@ -215,6 +215,7 @@ impl YoutubeCollectorEnv {
 
     /// Save a transcript while optionally suppressing the Auto-Flow wake. Callers that suppress
     /// the wake must persist a durable deferred-ingest record before this source becomes visible.
+    #[allow(clippy::too_many_arguments)]
     pub async fn save_video_to_sources_with_autoflow(
         &self,
         video_id: &str,

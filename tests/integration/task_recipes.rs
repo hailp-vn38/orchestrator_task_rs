@@ -135,9 +135,7 @@ impl TypedAgentStepRecipe {
     const AGENT: &'static str = "recipe_worker";
     const COMPLETE_TOOL: &'static str = "recipe_topic_selection_complete";
 
-    fn completion_result<'a>(
-        transcript: &'a [ModelMessage],
-    ) -> Vec<(&'a ModelToolCall, &'a ModelMessage)> {
+    fn completion_result(transcript: &[ModelMessage]) -> Vec<(&ModelToolCall, &ModelMessage)> {
         transcript
             .iter()
             .flat_map(|message| message.tool_calls.iter())
@@ -1095,7 +1093,7 @@ async fn recipe_playlist_compacts_transcripts_and_uses_the_ledger_for_the_next_b
         "the recipe must ask the ledger for each next batch after compaction"
     );
     assert!(
-        scripted.summary_requests().len() >= 1,
+        !scripted.summary_requests().is_empty(),
         "large yt-dlp transcript output must trigger runtime compaction"
     );
     let detail = manager.get_task_detail(&created.id).await.unwrap();

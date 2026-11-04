@@ -139,6 +139,7 @@ impl SharedPdfState {
     }
 
     /// Lưu tài liệu PDF đã chuyển đổi vào `sources/<topic_folder>/<stem>.md` và kích hoạt `autoflow_notify`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn save_doc_to_sources(
         self: &Arc<Self>,
         requested_idx: Option<usize>,
