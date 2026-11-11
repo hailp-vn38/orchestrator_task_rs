@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "llm-wiki-rs"
-version = "0.2.1"
+version = "0.2.3"
 dependencies = [
  "blake3",
  "chrono",
@@ -1678,7 +1678,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orchestrator-agent"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "orchestrator-flow"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anydoc",
  "async-trait",
