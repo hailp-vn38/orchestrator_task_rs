@@ -24,7 +24,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.15"
-llm-wiki-rs = "0.2.0"
+llm-wiki-rs = "0.2.2"
 lopdf = "0.45"
 orchestrator-agent = "0.7.0"
 pdf-inspector = "1.25"
